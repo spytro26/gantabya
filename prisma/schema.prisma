@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== USER MODEL ====================
+model User {
+  id       String  @id @default(uuid())
+  name     String
+  email    String  @unique
+  password String
+  verified Boolean @default(false)
+
+  role       Role           @default(USER)
+  groups     BookingGroup[]
+  ownedBuses Bus[] // For admin's buses
+  createdAt  DateTime       @default(now())
+}
+
+model EmailVerification {
+  id        Int      @id @default(autoincrement())
+  email     String
+  otp       String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+// ==================== BUS MODEL ====================
+model Bus {
+  id         String     @id @default(uuid())
+  adminId    String
+  admin      User       @relation(fields: [adminId], references: [id], onDelete: Cascade)
+  busNumber  String     @unique
+  name       String
+  type       BusType
+  layoutType LayoutType
+  totalSeats Int        @default(0)
+  seats      Seat[]
+  stops      Stop[]
+  trips      Trip[]
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  @@index([adminId])
+  @@index([busNumber])
+}
+
+enum BusType {
+  SEATER
+  SLEEPER
+  MIXED
+}
+
+enum LayoutType {
+  TWO_TWO // 2+2 seating (4 seats per row)
+  THREE_TWO // 3+2 seating (5 seats per row)
+  FOUR_TWO // 4+2 seating (6 seats per row)
+}
+
+// ==================== STOP MODEL ====================
+model Stop {
+  id                 String    @id @default(uuid())
+  busId              String
+  bus                Bus       @relation(fields: [busId], references: [id], onDelete: Cascade)
+  name               String
+  city               String // City name for better filtering
+  state              String? // Optional state
+  stopIndex          Int // Order of stop (0 = origin, 1 = next, etc.)
+  arrivalTime        DateTime? // Null for first stop
+  departureTime      DateTime? // Null for last stop
+  distanceFromOrigin Float     @default(0) // Distance in KM from origin
+  priceFromOrigin    Float     @default(0) // Cumulative price from origin
+
+  // Relations
+  groupsFrom BookingGroup[] @relation("GroupFromStop")
+  groupsTo   BookingGroup[] @relation("GroupToStop")
+
+  @@unique([busId, stopIndex])
+  @@index([busId, stopIndex])
+  @@index([city])
+}
+
+// ==================== SEAT MODEL ====================
+model Seat {
+  id         String    @id @default(uuid())
+  busId      String
+  bus        Bus       @relation(fields: [busId], references: [id], onDelete: Cascade)
+  seatNumber String // "1", "2", "3", etc.
+  row        Int // 0-4 (for 5x5 grid)
+  column     Int // 0-4
+  type       SeatType // SEATER or SLEEPER
+  level      SeatLevel // UPPER or LOWER
+  isActive   Boolean   @default(true) // For temporarily disabling seats
+
+  bookings Booking[]
+
+  @@unique([busId, row, column, level])
+  @@index([busId])
+  @@index([busId, type])
+}
+
+enum SeatType {
+  SEATER
+  SLEEPER
+}
+
+enum SeatLevel {
+  UPPER
+  LOWER
+}
+
+// ==================== TRIP MODEL ====================
+model Trip {
+  id            String         @id @default(uuid())
+  busId         String
+  bus           Bus            @relation(fields: [busId], references: [id], onDelete: Cascade)
+  tripDate      DateTime // Date of journey
+  status        TripStatus     @default(SCHEDULED)
+  bookingGroups BookingGroup[]
+  bookings      Booking[]
+  createdAt     DateTime       @default(now())
+
+  @@index([busId, tripDate])
+  @@index([tripDate, status])
+}
+
+enum TripStatus {
+  SCHEDULED
+  ONGOING
+  COMPLETED
+  CANCELLED
+}
+
+// ==================== BOOKING GROUP MODEL ====================
+model BookingGroup {
+  id         String      @id @default(uuid())
+  userId     String
+  user       User        @relation(fields: [userId], references: [id])
+  tripId     String
+  trip       Trip        @relation(fields: [tripId], references: [id])
+  fromStopId String
+  fromStop   Stop        @relation("GroupFromStop", fields: [fromStopId], references: [id])
+  toStopId   String
+  toStop     Stop        @relation("GroupToStop", fields: [toStopId], references: [id])
+  totalPrice Float
+  status     GroupStatus @default(PENDING)
+
+  bookings Booking[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([tripId])
+  @@index([status])
+}
+
+enum GroupStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  REFUNDED
+}
+
+// ==================== BOOKING MODEL ====================
+model Booking {
+  id      String        @id @default(uuid())
+  groupId String
+  group   BookingGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  tripId  String
+  trip    Trip          @relation(fields: [tripId], references: [id])
+  seatId  String
+  seat    Seat          @relation(fields: [seatId], references: [id])
+  status  BookingStatus @default(CONFIRMED)
+
+  cancelledAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  // CRITICAL: Prevent double booking - only one CONFIRMED booking per seat per trip
+  @@unique([tripId, seatId], name: "unique_trip_seat")
+  @@index([tripId, status])
+  @@index([groupId])
+}
+
+enum BookingStatus {
+  CONFIRMED
+  CANCELLED
+}

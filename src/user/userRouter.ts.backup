@@ -1,0 +1,232 @@
+import express from "express";
+import jwt from "jsonwebtoken";
+import z from "zod";
+import nodemailer from "nodemailer";
+
+import { prisma } from "../index.js";
+import "dotenv/config";
+import { signupSchema } from "../schemas/signupSchema.js";
+import cookieParser from "cookie-parser";
+const JWT_SECRET = process.env.userSecret;
+import { sendGmail } from "./sendmail.js";
+const app = express();
+app.use(cookieParser());
+export const userRouter = express.Router();
+import bcrypt from "bcrypt";
+userRouter.get("/",  async (req, res) => {
+ 
+  return res.status(402).json({ message: "welcome to the user router" });
+});
+
+userRouter.post("/signup", async (req, res) => {
+  if (!req.body) {
+    return res.status(400).json({ errorMessage: "body not recieved" });
+  }
+
+  const { name, email,  password } = req.body;
+
+  const isInSchema = signupSchema.safeParse(req.body);
+  if (!isInSchema.success) {
+    return res.status(402).json({
+      mesage: "not in the proper signup schema format",
+      errorMessage: isInSchema.error?.issues[0]?.message,
+    });
+  }
+  
+  try {
+    // Send OTP
+    const otp = await sendGmail(email);
+    
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 12);
+    
+    // Create email verification record
+    await prisma.emailVerification.create({
+      data: {
+        otp: otp.toString(),
+        email,
+        expiresAt: new Date(Date.now() + 60 * 1000 * 10),
+      },
+    });
+    
+    // Create user
+    const created = await prisma.user.create({
+      data: {
+        name,
+        email,
+        password: hashedPassword,
+      },
+    });
+    
+    return res
+      .status(200)
+      .json({ message: "signup sucessfull" });
+      
+  } catch (e: any) {
+    console.error("Error in signup:", e);
+
+    if (e.code === "P2002") {
+      if (e.meta?.target?.includes("email")) {
+        return res
+          .status(400)
+          .json({ errorMessage: "email already registered" });
+      }
+      if (e.meta?.target?.includes("phone")) {
+        return res
+          .status(400)
+          .json({ errorMessage: "phone number already registered" });
+      }
+    }
+userRouter.post("/verifyEmail", async (req, res) => {
+  const { otp, email } = req.body;
+  
+  if (!otp || !email) {
+    return res.status(400).json({ errorMessage: "OTP and email required" });
+  }
+
+  try {
+    // Find OTP record
+    const find = await prisma.emailVerification.findFirst({
+      where: {
+        email: email,
+        otp: otp,
+      }
+    });
+
+    if (!find) {
+      return res.status(404).json({ message: "wrong otp" });
+    }
+
+    if (new Date() > find.expiresAt) {
+      return res.status(404).json({ message: "otp expired" });
+    }
+
+    // Use transaction for atomic operations
+    await prisma.$transaction(async (tx) => {
+      await tx.emailVerification.deleteMany({
+        where: {
+          email: email,
+          otp: otp
+        }
+      });
+      
+      await tx.user.update({
+        where: {
+          email
+        },
+        data: {
+          verified: true,
+        }
+      });
+    });
+
+    return res.status(200).json({ message: "email verified" });
+
+  } catch (e: any) {
+    console.error("Error while email verification:", e);
+    return res.status(500).json({ 
+      errorMessage: "error during email verification" 
+    });
+  }
+})  console.log("error while the email verification "); 
+  }
+
+   return res.status(200).json({ message: "email verified" });
+
+userRouter.post("/signin", async (req, res): Promise<any> => {
+  const { email, password } = req.body;
+  
+  if (!email || !password) {
+    return res.status(400).json({ 
+      errorMessage: "Email and password required" 
+    });
+  }
+
+  try {
+    // Find user
+    const userFound = await prisma.user.findFirst({
+      where: {
+        email,
+        verified: true,
+      }
+    });
+
+    if (!userFound) {
+      return res.status(401).json({ 
+        message: "Invalid email or password" 
+      });
+    }
+
+    // Verify password
+    const validpass = await bcrypt.compare(password, userFound.password);
+    if (!validpass) {
+      return res.status(401).json({ 
+        message: "Invalid email or password" 
+      });
+    }
+
+    // Generate JWT
+    if (!JWT_SECRET) {
+      console.error("JWT_SECRET not configured");
+      return res.status(500).json({ 
+        errorMessage: "internal server error" 
+      });
+    }
+
+    const token = jwt.sign(
+      { userId: userFound.id, email: userFound.email },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    return res
+      .status(200)
+      .cookie("token", token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      })
+      .json({ message: "user signed in successfully" });
+
+  } catch (e: any) {
+    console.error("Error in signin:", e);
+    return res.status(500).json({ 
+      errorMessage: "error during signin" 
+    });
+  }
+})const token = jwt.sign((userFound?.id).toString(), JWT_SECRET);
+  return res.status(200).cookie("token", token, { httpOnly: true, secure: true }).json({message : "user signined succefully"})
+
+})
+
+
+
+
+
+ // after the  signin route we need the which returns the bus with the specicxit router
+ userRouter.post("/showbus", async (req , res ) : Promise <any>=>{
+
+   // >?/ 
+
+   const {start , end} = req.body;
+  
+
+
+
+   
+   
+
+ })
+
+ userRouter.get("/showbusinfo/:busId", async (req , res ) : Promise <any> => {
+// shows the bus details from the backend  returns seat and which are booked
+ })
+
+ userRouter.post("/bookticket" , async (req ,res) =>{
+  // book the ticket
+ })
+
+ userRouter.post("/cancelticket" , async (req, res)=>{
+
+ })
