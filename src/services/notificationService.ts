@@ -123,14 +123,14 @@ export async function notifyBookingConfirmed(
   }
 ) {
   const seatList = tripDetails.seatNumbers.join(", ");
-  
+
   // Format date nicely (remove time portion)
   const dateObj = new Date(tripDetails.date);
-  const formattedDate = dateObj.toLocaleDateString('en-US', {
-    weekday: 'short',
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
+  const formattedDate = dateObj.toLocaleDateString("en-US", {
+    weekday: "short",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
   });
 
   return createNotification({

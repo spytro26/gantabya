@@ -583,6 +583,14 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
               orderBy: { stopIndex: "asc" },
             },
             amenities: true,
+            images: {
+              orderBy: { createdAt: "asc" },
+              select: {
+                id: true,
+                imageUrl: true,
+                createdAt: true,
+              },
+            },
             holidays: {
               where: {
                 date: {
@@ -778,6 +786,7 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
                 hasTV: trip.bus.amenities.hasTV,
               }
             : null,
+          images: trip.bus.images || [],
         };
       })
       .filter((trip) => trip !== null);
@@ -938,6 +947,14 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
               where: { isActive: true },
               orderBy: [{ level: "asc" }, { row: "asc" }, { column: "asc" }],
             },
+            images: {
+              orderBy: { createdAt: "asc" },
+              select: {
+                id: true,
+                imageUrl: true,
+                createdAt: true,
+              },
+            },
           },
         },
         bookings: {
@@ -1035,6 +1052,7 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
         totalSeats: trip.bus.totalSeats,
         gridRows: trip.bus.gridRows,
         gridColumns: trip.bus.gridColumns,
+        images: trip.bus.images || [],
       },
       route: {
         fromStop: {

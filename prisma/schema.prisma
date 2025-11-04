@@ -76,6 +76,7 @@ model Bus {
   trips     Trip[]
   amenities BusAmenities?
   holidays  Holiday[] // Days when this bus doesn't run
+  images    BusImage[] // Bus images uploaded by admin
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
 
@@ -356,4 +357,17 @@ model Holiday {
   @@unique([busId, date]) // Can't have duplicate holidays for same bus on same date
   @@index([busId, date])
   @@index([date])
+}
+
+// ==================== BUS IMAGE MODEL ====================
+model BusImage {
+  id         String   @id @default(uuid())
+  busId      String
+  bus        Bus      @relation(fields: [busId], references: [id], onDelete: Cascade)
+  imageUrl   String // Cloudinary URL
+  publicId   String // Cloudinary public ID for deletion
+  uploadedBy String // Admin ID who uploaded
+  createdAt  DateTime @default(now())
+
+  @@index([busId])
 }

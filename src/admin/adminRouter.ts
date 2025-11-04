@@ -4,6 +4,8 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import cookieParser from "cookie-parser";
 import { sendGmail } from "../user/sendmail.js";
+import multer from "multer";
+import cloudinary from "../config/cloudinary.js";
 import "dotenv/config";
 
 const JWT_SECRET = process.env.adminSecret || process.env.userSecret;
@@ -2751,6 +2753,247 @@ adminRouter.get(
       return res
         .status(500)
         .json({ errorMessage: "Failed to fetch usage stats" });
+    }
+  }
+);
+
+// ==================== BUS IMAGE UPLOAD ENDPOINTS ====================
+
+// Configure multer for memory storage
+const storage = multer.memoryStorage();
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB total limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Only allow jpg and png
+    if (file.mimetype === "image/jpeg" || file.mimetype === "image/png") {
+      cb(null, true);
+    } else {
+      cb(new Error("Only JPG and PNG images are allowed"));
+    }
+  },
+});
+
+/**
+ * POST /admin/buses/:busId/images
+ * Upload images for a bus (max 10 images)
+ */
+adminRouter.post(
+  "/buses/:busId/images",
+  authenticateAdmin,
+  upload.array("images", 10), // Max 10 images
+  async (req: AuthRequest, res): Promise<any> => {
+    const { busId } = req.params;
+    const adminId = req.adminId;
+    const files = req.files as Express.Multer.File[];
+
+    if (!files || files.length === 0) {
+      return res.status(400).json({ errorMessage: "No images provided" });
+    }
+
+    if (!busId || !adminId) {
+      return res.status(400).json({ errorMessage: "Invalid request" });
+    }
+
+    try {
+      // Verify bus belongs to this admin
+      const bus = await prisma.bus.findUnique({
+        where: { id: busId },
+        include: { images: true },
+      });
+
+      if (!bus) {
+        return res.status(404).json({ errorMessage: "Bus not found" });
+      }
+
+      if (bus.adminId !== adminId) {
+        return res.status(403).json({
+          errorMessage: "You can only upload images for your own buses",
+        });
+      }
+
+      // Check if adding these images would exceed 10 total
+      if (bus.images.length + files.length > 10) {
+        return res.status(400).json({
+          errorMessage: `Cannot upload ${files.length} images. Maximum 10 images allowed per bus. Current: ${bus.images.length}`,
+        });
+      }
+
+      // Upload images to Cloudinary
+      const uploadPromises = files.map((file) => {
+        return new Promise<{ url: string; publicId: string }>(
+          (resolve, reject) => {
+            const uploadStream = cloudinary.uploader.upload_stream(
+              {
+                folder: `bus_images/${busId}`,
+                resource_type: "image",
+                transformation: [
+                  { width: 1200, height: 800, crop: "limit" }, // Limit max size
+                  { quality: "auto:good" }, // Optimize quality
+                ],
+              },
+              (error, result) => {
+                if (error) {
+                  console.error("Cloudinary upload error:", error);
+                  reject(error);
+                } else {
+                  console.log(
+                    "✅ Image uploaded to Cloudinary:",
+                    result!.secure_url
+                  );
+                  resolve({
+                    url: result!.secure_url,
+                    publicId: result!.public_id,
+                  });
+                }
+              }
+            );
+            uploadStream.end(file.buffer);
+          }
+        );
+      });
+
+      const uploadedImages = await Promise.all(uploadPromises);
+
+      // Save image records to database
+      const imageRecords = await Promise.all(
+        uploadedImages.map((img) =>
+          prisma.busImage.create({
+            data: {
+              busId,
+              imageUrl: img.url,
+              publicId: img.publicId,
+              uploadedBy: adminId!,
+            },
+          })
+        )
+      );
+
+      return res.status(201).json({
+        message: `${imageRecords.length} image(s) uploaded successfully`,
+        images: imageRecords,
+        totalImages: bus.images.length + imageRecords.length,
+      });
+    } catch (error: any) {
+      console.error("Error uploading images:", error);
+      return res.status(500).json({
+        errorMessage: error.message || "Failed to upload images",
+      });
+    }
+  }
+);
+
+/**
+ * GET /admin/buses/:busId/images
+ * Get all images for a bus
+ */
+adminRouter.get(
+  "/buses/:busId/images",
+  authenticateAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    const { busId } = req.params;
+    const adminId = req.adminId;
+
+    if (!busId || !adminId) {
+      return res.status(400).json({ errorMessage: "Invalid request" });
+    }
+
+    try {
+      // Verify bus belongs to this admin
+      const bus = await prisma.bus.findUnique({
+        where: { id: busId },
+        include: {
+          images: {
+            orderBy: { createdAt: "asc" },
+          },
+        },
+      });
+
+      if (!bus) {
+        return res.status(404).json({ errorMessage: "Bus not found" });
+      }
+
+      if (bus.adminId !== adminId) {
+        return res.status(403).json({
+          errorMessage: "You can only view images for your own buses",
+        });
+      }
+
+      return res.status(200).json({
+        message: "Images fetched successfully",
+        images: bus.images,
+        totalImages: bus.images.length,
+        maxImages: 10,
+      });
+    } catch (error) {
+      console.error("Error fetching images:", error);
+      return res.status(500).json({ errorMessage: "Failed to fetch images" });
+    }
+  }
+);
+
+/**
+ * DELETE /admin/buses/:busId/images/:imageId
+ * Delete a bus image
+ */
+adminRouter.delete(
+  "/buses/:busId/images/:imageId",
+  authenticateAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    const { busId, imageId } = req.params;
+    const adminId = req.adminId;
+
+    if (!busId || !imageId || !adminId) {
+      return res.status(400).json({ errorMessage: "Invalid request" });
+    }
+
+    try {
+      // Verify bus belongs to this admin
+      const bus = await prisma.bus.findUnique({
+        where: { id: busId },
+      });
+
+      if (!bus) {
+        return res.status(404).json({ errorMessage: "Bus not found" });
+      }
+
+      if (bus.adminId !== adminId) {
+        return res.status(403).json({
+          errorMessage: "You can only delete images from your own buses",
+        });
+      }
+
+      // Get image record
+      const image = await prisma.busImage.findUnique({
+        where: { id: imageId },
+      });
+
+      if (!image) {
+        return res.status(404).json({ errorMessage: "Image not found" });
+      }
+
+      if (image.busId !== busId) {
+        return res.status(400).json({
+          errorMessage: "Image does not belong to this bus",
+        });
+      }
+
+      // Delete from Cloudinary
+      await cloudinary.uploader.destroy(image.publicId);
+
+      // Delete from database
+      await prisma.busImage.delete({
+        where: { id: imageId },
+      });
+
+      return res.status(200).json({
+        message: "Image deleted successfully",
+      });
+    } catch (error) {
+      console.error("Error deleting image:", error);
+      return res.status(500).json({ errorMessage: "Failed to delete image" });
     }
   }
 );
