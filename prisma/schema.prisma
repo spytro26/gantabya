@@ -13,12 +13,16 @@ model User {
   name     String
   email    String  @unique
   password String
-  verified Boolean @default(false)
+  verified Boolean @default(false) // Email verification for users, admin approval for admins
+  phone    String? // Added for notifications
 
-  role       Role           @default(USER)
-  groups     BookingGroup[]
-  ownedBuses Bus[] // For admin's buses
-  createdAt  DateTime       @default(now())
+  role                Role           @default(USER)
+  adminVerified       Boolean        @default(false) // Only for ADMIN role - verified by super admin
+  adminVerificationAt DateTime? // When admin was verified
+  groups              BookingGroup[]
+  ownedBuses          Bus[] // For admin's buses
+  notifications       Notification[]
+  createdAt           DateTime       @default(now())
 }
 
 model EmailVerification {
@@ -29,9 +33,27 @@ model EmailVerification {
   createdAt DateTime @default(now())
 }
 
+model PasswordReset {
+  id        Int      @id @default(autoincrement())
+  email     String
+  otp       String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+}
+
+model SuperAdmin {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  createdAt DateTime @default(now())
+}
+
 enum Role {
   USER
   ADMIN
+  SUPERADMIN
 }
 
 // ==================== BUS MODEL ====================
@@ -44,11 +66,18 @@ model Bus {
   type       BusType
   layoutType LayoutType
   totalSeats Int        @default(0)
-  seats      Seat[]
-  stops      Stop[]
-  trips      Trip[]
-  createdAt  DateTime   @default(now())
-  updatedAt  DateTime   @updatedAt
+
+  // Grid dimensions for realistic bus layout (rotated 90° - narrow width, long length)
+  gridRows    Int @default(15) // Bus length (front to back) - max 15 rows
+  gridColumns Int @default(4) // Bus width (side to side) - max 4 columns (like 2+2 or single+aisle+single)
+
+  seats     Seat[]
+  stops     Stop[]
+  trips     Trip[]
+  amenities BusAmenities?
+  holidays  Holiday[] // Days when this bus doesn't run
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
 
   @@index([adminId])
   @@index([busNumber])
@@ -68,17 +97,27 @@ enum LayoutType {
 
 // ==================== STOP MODEL ====================
 model Stop {
-  id                 String    @id @default(uuid())
-  busId              String
-  bus                Bus       @relation(fields: [busId], references: [id], onDelete: Cascade)
-  name               String
-  city               String // City name for better filtering
-  state              String? // Optional state
-  stopIndex          Int // Order of stop (0 = origin, 1 = next, etc.)
-  arrivalTime        DateTime? // Null for first stop
-  departureTime      DateTime? // Null for last stop
-  distanceFromOrigin Float     @default(0) // Distance in KM from origin
-  priceFromOrigin    Float     @default(0) // Cumulative price from origin
+  id            String  @id @default(uuid())
+  busId         String
+  bus           Bus     @relation(fields: [busId], references: [id], onDelete: Cascade)
+  name          String
+  city          String // City name for better filtering
+  state         String? // Optional state
+  stopIndex     Int // Order of stop (0 = origin, 1 = next, etc.)
+  arrivalTime   String? // Time in format "10:30 AM" - Null for first stop (forward trip)
+  departureTime String? // Time in format "10:30 AM" - Null for last stop (forward trip)
+
+  // Return trip timings (for reverse direction)
+  returnArrivalTime   String? // Arrival time when traveling in reverse (e.g., D→A)
+  returnDepartureTime String? // Departure time when traveling in reverse
+
+  distanceFromOrigin Float @default(0) // Distance in KM from origin
+  priceFromOrigin    Float @default(0) // Cumulative price from origin (DEPRECATED - use seat-specific prices)
+
+  // Pricing by seat type and level (same for both forward and return trips)
+  lowerSeaterPrice  Float @default(0) // Price for lower deck seater from origin to this stop
+  lowerSleeperPrice Float @default(0) // Price for lower deck sleeper from origin to this stop
+  upperSleeperPrice Float @default(0) // Price for upper deck sleeper from origin to this stop
 
   // Relations
   groupsFrom BookingGroup[] @relation("GroupFromStop")
@@ -87,25 +126,34 @@ model Stop {
   @@unique([busId, stopIndex])
   @@index([busId, stopIndex])
   @@index([city])
+  @@index([name])
 }
 
 // ==================== SEAT MODEL ====================
 model Seat {
-  id         String    @id @default(uuid())
+  id         String @id @default(uuid())
   busId      String
-  bus        Bus       @relation(fields: [busId], references: [id], onDelete: Cascade)
+  bus        Bus    @relation(fields: [busId], references: [id], onDelete: Cascade)
   seatNumber String // "1", "2", "3", etc.
-  row        Int // 0-4 (for 5x5 grid)
-  column     Int // 0-4
-  type       SeatType // SEATER or SLEEPER
-  level      SeatLevel // UPPER or LOWER
-  isActive   Boolean   @default(true) // For temporarily disabling seats
+
+  // Position in grid (top-left corner of the seat)
+  row    Int // 0 to gridRows-1
+  column Int // 0 to gridColumns-1
+
+  // Dimensions (for sleeper seats that span multiple cells)
+  rowSpan    Int @default(1) // 1 for normal, 2 for vertical sleeper
+  columnSpan Int @default(1) // 1 for normal, 2 for horizontal sleeper
+
+  type     SeatType // SEATER or SLEEPER
+  level    SeatLevel // UPPER or LOWER
+  isActive Boolean   @default(true) // For temporarily disabling seats
 
   bookings Booking[]
 
-  @@unique([busId, row, column, level])
+  @@unique([busId, seatNumber, level]) // Seat number must be unique per bus per level
   @@index([busId])
   @@index([busId, type])
+  @@index([busId, level])
 }
 
 enum SeatType {
@@ -123,12 +171,13 @@ model Trip {
   id            String         @id @default(uuid())
   busId         String
   bus           Bus            @relation(fields: [busId], references: [id], onDelete: Cascade)
-  tripDate      DateTime // Date of journey
+  tripDate      DateTime       @db.Date // Date of journey
   status        TripStatus     @default(SCHEDULED)
   bookingGroups BookingGroup[]
   bookings      Booking[]
   createdAt     DateTime       @default(now())
 
+  @@unique([busId, tripDate]) // Enables auto-trip creation with upsert
   @@index([busId, tripDate])
   @@index([tripDate, status])
 }
@@ -154,10 +203,15 @@ model BookingGroup {
   totalPrice Float
   status     GroupStatus @default(PENDING)
 
-  bookings Booking[]
+  // Offer/Coupon fields
+  offerId        String?
+  offer          Offer?  @relation(fields: [offerId], references: [id])
+  discountAmount Float   @default(0)
+  finalPrice     Float? // totalPrice - discountAmount
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  bookings  Booking[]
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
 
   @@index([userId])
   @@index([tripId])
@@ -182,8 +236,9 @@ model Booking {
   seat    Seat          @relation(fields: [seatId], references: [id])
   status  BookingStatus @default(CONFIRMED)
 
+  passenger   Passenger?
   cancelledAt DateTime?
-  createdAt   DateTime  @default(now())
+  createdAt   DateTime   @default(now())
 
   // CRITICAL: Prevent double booking - only one CONFIRMED booking per seat per trip
   @@unique([tripId, seatId], name: "unique_trip_seat")
@@ -194,4 +249,111 @@ model Booking {
 enum BookingStatus {
   CONFIRMED
   CANCELLED
+}
+
+// ==================== PASSENGER MODEL ====================
+model Passenger {
+  id        String   @id @default(uuid())
+  bookingId String   @unique
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  name      String
+  age       Int
+  gender    Gender
+  phone     String?
+  email     String?
+  createdAt DateTime @default(now())
+
+  @@index([bookingId])
+}
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+// ==================== BUS AMENITIES MODEL ====================
+model BusAmenities {
+  id             String   @id @default(uuid())
+  busId          String   @unique
+  bus            Bus      @relation(fields: [busId], references: [id], onDelete: Cascade)
+  hasWifi        Boolean  @default(false)
+  hasCharging    Boolean  @default(false)
+  hasAC          Boolean  @default(true)
+  hasRestroom    Boolean  @default(false)
+  hasBlanket     Boolean  @default(false)
+  hasWaterBottle Boolean  @default(false)
+  hasSnacks      Boolean  @default(false)
+  hasTV          Boolean  @default(false)
+  description    String?
+  updatedAt      DateTime @updatedAt
+}
+
+// ==================== OFFERS & COUPONS MODEL ====================
+model Offer {
+  id               String         @id @default(uuid())
+  code             String         @unique
+  description      String
+  discountType     DiscountType
+  discountValue    Float // percentage or fixed amount
+  minBookingAmount Float?
+  maxDiscount      Float? // Max discount cap for percentage type
+  validFrom        DateTime
+  validUntil       DateTime
+  usageLimit       Int? // null = unlimited
+  usageCount       Int            @default(0)
+  isActive         Boolean        @default(true)
+  applicableBuses  String[] // Array of bus IDs, empty = all buses
+  createdBy        String // Admin ID
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  bookingGroups    BookingGroup[]
+
+  @@index([code])
+  @@index([isActive, validFrom, validUntil])
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+// ==================== NOTIFICATION MODEL ====================
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  message   String
+  isRead    Boolean          @default(false)
+  metadata  Json? // Additional data like bookingId, tripId, etc.
+  createdAt DateTime         @default(now())
+
+  @@index([userId, isRead])
+  @@index([createdAt])
+}
+
+enum NotificationType {
+  BOOKING_CONFIRMED
+  BOOKING_CANCELLED
+  TRIP_CANCELLED
+  OFFER_APPLIED
+  TRIP_REMINDER
+  GENERAL
+}
+
+// ==================== HOLIDAY MODEL ====================
+model Holiday {
+  id        String   @id @default(uuid())
+  busId     String
+  bus       Bus      @relation(fields: [busId], references: [id], onDelete: Cascade)
+  date      DateTime @db.Date // Date when bus doesn't run
+  reason    String? // Optional: "Diwali", "Maintenance", etc.
+  createdBy String // Admin ID who created this holiday
+  createdAt DateTime @default(now())
+
+  @@unique([busId, date]) // Can't have duplicate holidays for same bus on same date
+  @@index([busId, date])
+  @@index([date])
 }

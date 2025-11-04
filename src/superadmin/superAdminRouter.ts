@@ -1,0 +1,476 @@
+import express from "express";
+import { prisma } from "../index.js";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcrypt";
+import cookieParser from "cookie-parser";
+import "dotenv/config";
+
+const JWT_SECRET =
+  process.env.superAdminSecret || "super-secret-key-change-in-production";
+const app = express();
+app.use(cookieParser());
+export const superAdminRouter = express.Router();
+
+// Extend Express Request type to include superAdminId
+interface AuthRequest extends express.Request {
+  superAdminId?: string;
+}
+
+// Middleware to verify JWT token and extract superAdminId
+const authenticateSuperAdmin = async (
+  req: AuthRequest,
+  res: any,
+  next: any
+) => {
+  const token = req.cookies.superAdminToken;
+
+  if (!token) {
+    return res.status(401).json({ errorMessage: "Authentication required" });
+  }
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as { id: string };
+    req.superAdminId = decoded.id;
+
+    // Verify super admin exists
+    const superAdmin = await prisma.superAdmin.findUnique({
+      where: { id: decoded.id },
+    });
+
+    if (!superAdmin) {
+      return res
+        .status(403)
+        .json({ errorMessage: "Super admin access required" });
+    }
+
+    next();
+  } catch (e) {
+    return res.status(401).json({ errorMessage: "Invalid or expired token" });
+  }
+};
+
+// Super Admin Signin endpoint
+superAdminRouter.post("/signin", async (req, res): Promise<any> => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res.status(400).json({
+      errorMessage: "Username and password are required",
+    });
+  }
+
+  try {
+    // Find super admin
+    const superAdmin = await prisma.superAdmin.findUnique({
+      where: { username },
+    });
+
+    if (!superAdmin) {
+      return res.status(401).json({
+        errorMessage: "Invalid credentials",
+      });
+    }
+
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, superAdmin.password);
+
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        errorMessage: "Invalid credentials",
+      });
+    }
+
+    // Generate JWT token
+    const token = jwt.sign({ id: superAdmin.id }, JWT_SECRET, {
+      expiresIn: "7d",
+    });
+
+    // Set token in HTTP-only cookie
+    res.cookie("superAdminToken", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    });
+
+    return res.status(200).json({
+      message: "Super admin signin successful",
+      superAdmin: {
+        id: superAdmin.id,
+        username: superAdmin.username,
+      },
+    });
+  } catch (error) {
+    console.error("Super admin signin error:", error);
+    return res.status(500).json({
+      errorMessage: "An error occurred during signin",
+    });
+  }
+});
+
+// Get pending admins (waiting for verification)
+superAdminRouter.get(
+  "/pending-admins",
+  authenticateSuperAdmin,
+  async (req, res): Promise<any> => {
+    try {
+      const pendingAdmins = await prisma.user.findMany({
+        where: {
+          role: "ADMIN",
+          adminVerified: false,
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          verified: true,
+          createdAt: true,
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
+
+      return res.status(200).json({
+        admins: pendingAdmins,
+        count: pendingAdmins.length,
+      });
+    } catch (error) {
+      console.error("Error fetching pending admins:", error);
+      return res.status(500).json({
+        errorMessage: "An error occurred while fetching pending admins",
+      });
+    }
+  }
+);
+
+// Get all admins (both verified and pending)
+superAdminRouter.get(
+  "/admins",
+  authenticateSuperAdmin,
+  async (req, res): Promise<any> => {
+    try {
+      const admins = await prisma.user.findMany({
+        where: {
+          role: "ADMIN",
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          verified: true,
+          adminVerified: true,
+          adminVerificationAt: true,
+          createdAt: true,
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+      });
+
+      return res.status(200).json({
+        admins,
+        count: admins.length,
+      });
+    } catch (error) {
+      console.error("Error fetching admins:", error);
+      return res.status(500).json({
+        errorMessage: "An error occurred while fetching admins",
+      });
+    }
+  }
+);
+
+// Verify admin
+superAdminRouter.post(
+  "/verify-admin/:adminId",
+  authenticateSuperAdmin,
+  async (req, res): Promise<any> => {
+    const { adminId } = req.params;
+
+    if (!adminId) {
+      return res.status(400).json({
+        errorMessage: "Admin ID is required",
+      });
+    }
+
+    try {
+      // Check if admin exists
+      const admin = await prisma.user.findUnique({
+        where: { id: adminId as string },
+      });
+
+      if (!admin) {
+        return res.status(404).json({
+          errorMessage: "Admin not found",
+        });
+      }
+
+      if (admin.role !== "ADMIN") {
+        return res.status(400).json({
+          errorMessage: "User is not an admin",
+        });
+      }
+
+      if (admin.adminVerified) {
+        return res.status(400).json({
+          errorMessage: "Admin is already verified",
+        });
+      }
+
+      // Verify admin
+      const updatedAdmin = await prisma.user.update({
+        where: { id: adminId as string },
+        data: {
+          adminVerified: true,
+          adminVerificationAt: new Date(),
+        },
+      });
+
+      return res.status(200).json({
+        message: "Admin verified successfully",
+        admin: {
+          id: updatedAdmin.id,
+          name: updatedAdmin.name,
+          email: updatedAdmin.email,
+          adminVerified: updatedAdmin.adminVerified,
+        },
+      });
+    } catch (error) {
+      console.error("Error verifying admin:", error);
+      return res.status(500).json({
+        errorMessage: "An error occurred while verifying admin",
+      });
+    }
+  }
+);
+
+// Revoke admin verification
+superAdminRouter.post(
+  "/revoke-admin/:adminId",
+  authenticateSuperAdmin,
+  async (req, res): Promise<any> => {
+    const { adminId } = req.params;
+
+    if (!adminId) {
+      return res.status(400).json({
+        errorMessage: "Admin ID is required",
+      });
+    }
+
+    try {
+      const admin = await prisma.user.findUnique({
+        where: { id: adminId as string },
+      });
+
+      if (!admin) {
+        return res.status(404).json({
+          errorMessage: "Admin not found",
+        });
+      }
+
+      if (admin.role !== "ADMIN") {
+        return res.status(400).json({
+          errorMessage: "User is not an admin",
+        });
+      }
+
+      // Revoke verification
+      const updatedAdmin = await prisma.user.update({
+        where: { id: adminId as string },
+        data: {
+          adminVerified: false,
+          adminVerificationAt: null,
+        },
+      });
+
+      return res.status(200).json({
+        message: "Admin verification revoked successfully",
+        admin: {
+          id: updatedAdmin.id,
+          name: updatedAdmin.name,
+          email: updatedAdmin.email,
+          adminVerified: updatedAdmin.adminVerified,
+        },
+      });
+    } catch (error) {
+      console.error("Error revoking admin:", error);
+      return res.status(500).json({
+        errorMessage: "An error occurred while revoking admin",
+      });
+    }
+  }
+);
+
+// Super admin logout
+superAdminRouter.post("/logout", (req, res): any => {
+  res.clearCookie("superAdminToken");
+  return res.status(200).json({ message: "Logout successful" });
+});
+
+// Check super admin authentication status
+superAdminRouter.get(
+  "/me",
+  authenticateSuperAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    try {
+      if (!req.superAdminId) {
+        return res.status(401).json({ errorMessage: "Not authenticated" });
+      }
+
+      const superAdmin = await prisma.superAdmin.findUnique({
+        where: { id: req.superAdminId as string },
+        select: {
+          id: true,
+          username: true,
+          createdAt: true,
+        },
+      });
+
+      if (!superAdmin) {
+        return res.status(404).json({ errorMessage: "Super admin not found" });
+      }
+
+      return res.status(200).json({ superAdmin });
+    } catch (error) {
+      console.error("Error fetching super admin:", error);
+      return res.status(500).json({
+        errorMessage: "An error occurred",
+      });
+    }
+  }
+);
+
+// Get specific admin details
+superAdminRouter.get(
+  "/admin/:adminId",
+  authenticateSuperAdmin,
+  async (req, res): Promise<any> => {
+    const { adminId } = req.params;
+
+    if (!adminId) {
+      return res.status(400).json({ errorMessage: "Admin ID is required" });
+    }
+
+    try {
+      const admin = await prisma.user.findUnique({
+        where: { id: adminId as string },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          verified: true,
+          adminVerified: true,
+          adminVerificationAt: true,
+          createdAt: true,
+        },
+      });
+
+      if (!admin) {
+        return res.status(404).json({ errorMessage: "Admin not found" });
+      }
+
+      if (admin.role !== "ADMIN") {
+        return res.status(400).json({ errorMessage: "User is not an admin" });
+      }
+
+      return res.status(200).json({ admin });
+    } catch (error) {
+      console.error("Error fetching admin:", error);
+      return res.status(500).json({
+        errorMessage: "An error occurred while fetching admin",
+      });
+    }
+  }
+);
+
+// Get admin's buses
+superAdminRouter.get(
+  "/admin/:adminId/buses",
+  authenticateSuperAdmin,
+  async (req, res): Promise<any> => {
+    const { adminId } = req.params;
+
+    if (!adminId) {
+      return res.status(400).json({ errorMessage: "Admin ID is required" });
+    }
+
+    try {
+      const buses = await prisma.bus.findMany({
+        where: { adminId: adminId as string },
+        select: {
+          id: true,
+          busNumber: true,
+          name: true,
+          type: true,
+          totalSeats: true,
+          createdAt: true,
+          _count: {
+            select: {
+              trips: true,
+              stops: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+
+      return res.status(200).json({ buses });
+    } catch (error) {
+      console.error("Error fetching admin buses:", error);
+      return res.status(500).json({
+        errorMessage: "An error occurred while fetching buses",
+      });
+    }
+  }
+);
+
+// Get admin's trips
+superAdminRouter.get(
+  "/admin/:adminId/trips",
+  authenticateSuperAdmin,
+  async (req, res): Promise<any> => {
+    const { adminId } = req.params;
+
+    if (!adminId) {
+      return res.status(400).json({ errorMessage: "Admin ID is required" });
+    }
+
+    try {
+      const trips = await prisma.trip.findMany({
+        where: {
+          bus: {
+            adminId: adminId as string,
+          },
+        },
+        select: {
+          id: true,
+          tripDate: true,
+          status: true,
+          createdAt: true,
+          bus: {
+            select: {
+              busNumber: true,
+              name: true,
+            },
+          },
+          _count: {
+            select: {
+              bookings: true,
+            },
+          },
+        },
+        orderBy: { tripDate: "desc" },
+        take: 100, // Limit to recent 100 trips
+      });
+
+      return res.status(200).json({ trips });
+    } catch (error) {
+      console.error("Error fetching admin trips:", error);
+      return res.status(500).json({
+        errorMessage: "An error occurred while fetching trips",
+      });
+    }
+  }
+);

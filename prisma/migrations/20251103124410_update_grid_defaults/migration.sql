@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Bus" ALTER COLUMN "gridColumns" SET DEFAULT 15,
+ALTER COLUMN "gridRows" SET DEFAULT 4;
