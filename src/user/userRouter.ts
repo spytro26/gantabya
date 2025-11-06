@@ -82,7 +82,10 @@ const calculateDiscountAmount = (
   return Math.max(0, Math.min(discount, totalAmount));
 };
 
-const hasRemainingUsage = (offer: { usageLimit: number | null; usageCount: number }) => {
+const hasRemainingUsage = (offer: {
+  usageLimit: number | null;
+  usageCount: number;
+}) => {
   if (!offer.usageLimit) {
     return true;
   }
@@ -730,15 +733,15 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
             .filter((booking) => {
               const bookingFromIdx = booking.group.fromStop.stopIndex;
               const bookingToIdx = booking.group.toStop.stopIndex;
-              
+
               // ✅ CRITICAL FIX: Check if booking is in the SAME DIRECTION
               const bookingIsReturnTrip = bookingFromIdx > bookingToIdx;
-              
+
               // Skip bookings in opposite direction
               if (bookingIsReturnTrip !== isReturnTrip) {
                 return false;
               }
-              
+
               const bookingMin = Math.min(bookingFromIdx, bookingToIdx);
               const bookingMax = Math.max(bookingFromIdx, bookingToIdx);
 
@@ -1078,7 +1081,9 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
     const maxIndex = Math.max(fromStop.stopIndex, toStop.stopIndex);
 
     console.log(
-      `🔍 Checking seat availability for route segment: stopIndex ${fromStop.stopIndex} → ${toStop.stopIndex} (${isReturnTrip ? 'RETURN' : 'FORWARD'} trip)`
+      `🔍 Checking seat availability for route segment: stopIndex ${
+        fromStop.stopIndex
+      } → ${toStop.stopIndex} (${isReturnTrip ? "RETURN" : "FORWARD"} trip)`
     );
     console.log(`📊 Total bookings to check: ${trip.bookings.length}`);
 
@@ -1086,14 +1091,16 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
     trip.bookings.forEach((booking) => {
       const bookingFromIdx = booking.group.fromStop.stopIndex;
       const bookingToIdx = booking.group.toStop.stopIndex;
-      
+
       // Determine if the existing booking is a return trip (same logic as current request)
       const bookingIsReturnTrip = bookingFromIdx > bookingToIdx;
-      
+
       // ✅ CRITICAL FIX: Only consider bookings in the SAME DIRECTION
       if (bookingIsReturnTrip !== isReturnTrip) {
         console.log(
-          `✅ Seat ${booking.seat.seatNumber} is AVAILABLE (booking is ${bookingIsReturnTrip ? 'RETURN' : 'FORWARD'}, current trip is ${isReturnTrip ? 'RETURN' : 'FORWARD'})`
+          `✅ Seat ${booking.seat.seatNumber} is AVAILABLE (booking is ${
+            bookingIsReturnTrip ? "RETURN" : "FORWARD"
+          }, current trip is ${isReturnTrip ? "RETURN" : "FORWARD"})`
         );
         return; // Skip this booking - it's in the opposite direction
       }
@@ -1107,17 +1114,29 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
       // Check if segments overlap
       if (minIndex < bookingMax && maxIndex > bookingMin) {
         console.log(
-          `❌ Seat ${booking.seat.seatNumber} is OCCUPIED (${bookingIsReturnTrip ? 'RETURN' : 'FORWARD'} trip: ${bookingFromIdx}→${bookingToIdx} overlaps with ${fromStop.stopIndex}→${toStop.stopIndex})`
+          `❌ Seat ${booking.seat.seatNumber} is OCCUPIED (${
+            bookingIsReturnTrip ? "RETURN" : "FORWARD"
+          } trip: ${bookingFromIdx}→${bookingToIdx} overlaps with ${
+            fromStop.stopIndex
+          }→${toStop.stopIndex})`
         );
         occupiedSeatIds.add(booking.seatId);
       } else {
         console.log(
-          `✅ Seat ${booking.seat.seatNumber} is AVAILABLE (${bookingIsReturnTrip ? 'RETURN' : 'FORWARD'} trip: ${bookingFromIdx}→${bookingToIdx} does NOT overlap with ${fromStop.stopIndex}→${toStop.stopIndex})`
+          `✅ Seat ${booking.seat.seatNumber} is AVAILABLE (${
+            bookingIsReturnTrip ? "RETURN" : "FORWARD"
+          } trip: ${bookingFromIdx}→${bookingToIdx} does NOT overlap with ${
+            fromStop.stopIndex
+          }→${toStop.stopIndex})`
         );
       }
     });
 
-    console.log(`🔒 Total occupied seats in ${isReturnTrip ? 'RETURN' : 'FORWARD'} direction: ${occupiedSeatIds.size}`);
+    console.log(
+      `🔒 Total occupied seats in ${
+        isReturnTrip ? "RETURN" : "FORWARD"
+      } direction: ${occupiedSeatIds.size}`
+    );
 
     // Organize seats by level and create layout
     const seats = trip.bus.seats.map((seat) => ({
@@ -1135,14 +1154,13 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
     const lowerDeckSeats = seats.filter((s) => s.level === "LOWER");
     const upperDeckSeats = seats.filter((s) => s.level === "UPPER");
 
-    const fare = toStop.priceFromOrigin - fromStop.priceFromOrigin;
+    const fare = Math.abs(toStop.priceFromOrigin - fromStop.priceFromOrigin);
 
     const orderedStops = [...trip.bus.stops].sort(
       (a, b) => a.stopIndex - b.stopIndex
     );
-    const routeStops = (isReturnTrip
-      ? [...orderedStops].reverse()
-      : orderedStops
+    const routeStops = (
+      isReturnTrip ? [...orderedStops].reverse() : orderedStops
     ).map((stop) => ({
       id: stop.id,
       name: stop.name,
@@ -1309,289 +1327,299 @@ userRouter.post(
       }
 
       // Start transaction
-      const result = await prisma.$transaction(async (tx) => {
-        // 1. Verify trip exists and is bookable
-        const trip = await tx.trip.findUnique({
-          where: { id: tripId },
-          include: {
-            bus: {
-              include: {
-                stops: true,
-                seats: true,
+      const result = await prisma.$transaction(
+        async (tx) => {
+          // 1. Verify trip exists and is bookable
+          const trip = await tx.trip.findUnique({
+            where: { id: tripId },
+            include: {
+              bus: {
+                include: {
+                  stops: true,
+                  seats: true,
+                },
               },
             },
-          },
-        });
-
-        if (!trip) {
-          throw new Error("Trip not found");
-        }
-
-        if (trip.status === "CANCELLED" || trip.status === "COMPLETED") {
-          throw new Error("Trip is not available for booking");
-        }
-
-        // ✅ VALIDATION: Check if trip date/time has already passed
-        const now = new Date();
-        const tripDate = new Date(trip.tripDate);
-        tripDate.setHours(0, 0, 0, 0); // Normalize to start of day
-
-        const today = new Date();
-        today.setHours(0, 0, 0, 0); // Normalize to start of day
-
-        // Check if trip date is in the past
-        if (tripDate < today) {
-          throw new Error("Cannot book tickets for past dates");
-        }
-
-        // If trip is today, check if departure time has passed
-        if (tripDate.getTime() === today.getTime()) {
-          // Get the from stop to check departure time
-          const tempFromStop = trip.bus.stops.find((s) => s.id === fromStopId);
-          if (tempFromStop && tempFromStop.departureTime) {
-            try {
-              const timeParts = tempFromStop.departureTime
-                .split(":")
-                .map(Number);
-              const hours = timeParts[0];
-              const minutes = timeParts[1];
-
-              if (hours !== undefined && minutes !== undefined) {
-                const departureDateTime = new Date(tripDate);
-                departureDateTime.setHours(hours, minutes, 0, 0);
-
-                if (departureDateTime <= now) {
-                  throw new Error(
-                    "Cannot book tickets for buses that have already departed"
-                  );
-                }
-              }
-            } catch (err: any) {
-              if (err.message.includes("already departed")) {
-                throw err;
-              }
-              // Ignore time parsing errors
-            }
-          }
-        }
-
-        // 2. Verify stops exist and are in correct order
-        const fromStop = trip.bus.stops.find((s) => s.id === fromStopId);
-        const toStop = trip.bus.stops.find((s) => s.id === toStopId);
-
-        if (!fromStop || !toStop) {
-          throw new Error("Stops not found");
-        }
-
-        // Allow both forward and return trips
-        if (fromStop.stopIndex === toStop.stopIndex) {
-          throw new Error("From and to stops cannot be the same");
-        }
-
-        const boardingPoint = await tx.stopPoint.findUnique({
-          where: { id: boardingPointId },
-        });
-
-        if (!boardingPoint || boardingPoint.stopId !== fromStopId) {
-          throw new Error("Invalid boarding point selected");
-        }
-
-        if (boardingPoint.type !== "BOARDING") {
-          throw new Error("Selected boarding point is not valid for boarding");
-        }
-
-        const droppingPoint = await tx.stopPoint.findUnique({
-          where: { id: droppingPointId },
-        });
-
-        if (!droppingPoint || droppingPoint.stopId !== toStopId) {
-          throw new Error("Invalid dropping point selected");
-        }
-
-        // 3. Verify all seats exist and belong to this bus
-        const seats = await tx.seat.findMany({
-          where: {
-            id: { in: seatIds },
-            busId: trip.busId,
-            isActive: true,
-          },
-        });
-
-        if (seats.length !== seatIds.length) {
-          throw new Error("One or more seats are invalid or inactive");
-        }
-
-        // 4. Check if any seat is already booked for overlapping segments
-        // ✅ IMPORTANT: This check runs inside transaction, so it will see the latest state
-        // and prevent race conditions for concurrent booking attempts
-        const existingBookings = await tx.booking.findMany({
-          where: {
-            tripId,
-            seatId: { in: seatIds },
-            status: "CONFIRMED",
-          },
-          include: {
-            group: {
-              select: {
-                fromStop: { select: { stopIndex: true } },
-                toStop: { select: { stopIndex: true } },
-              },
-            },
-          },
-        });
-
-        // Check for overlaps - a seat is occupied if ANY existing booking overlaps with requested journey
-        const minIndex = Math.min(fromStop.stopIndex, toStop.stopIndex);
-        const maxIndex = Math.max(fromStop.stopIndex, toStop.stopIndex);
-
-        const conflictingBookings = existingBookings.filter((booking) => {
-          const bookingFromIdx = booking.group.fromStop.stopIndex;
-          const bookingToIdx = booking.group.toStop.stopIndex;
-          const bookingMin = Math.min(bookingFromIdx, bookingToIdx);
-          const bookingMax = Math.max(bookingFromIdx, bookingToIdx);
-
-          // Two segments overlap if: segment1.start < segment2.end AND segment1.end > segment2.start
-          // This works for both forward and return trips
-          return minIndex < bookingMax && maxIndex > bookingMin;
-        });
-
-        if (conflictingBookings.length > 0) {
-          const conflictedSeats = conflictingBookings
-            .map((b) => {
-              const seat = seats.find((s) => s.id === b.seatId);
-              return seat?.seatNumber || b.seatId;
-            })
-            .join(", ");
-
-          throw new Error(
-            `Seat(s) ${conflictedSeats} are already booked for this route segment. Please select different seats.`
-          );
-        }
-
-        // 5. Calculate total price
-        const farePerSeat = toStop.priceFromOrigin - fromStop.priceFromOrigin;
-        const totalPrice = farePerSeat * seatIds.length;
-
-        // 6. Apply coupon if provided
-        let appliedOffer = null;
-        let discountAmount = 0;
-        let finalPrice = totalPrice;
-
-        if (couponCode) {
-          const offer = await tx.offer.findUnique({
-            where: { code: couponCode.toUpperCase() },
           });
 
-          if (offer && offer.isActive) {
-            const now = new Date();
+          if (!trip) {
+            throw new Error("Trip not found");
+          }
 
-            // Check validity period
-            if (now >= offer.validFrom && now <= offer.validUntil) {
-              // Check usage limit
-              if (hasRemainingUsage(offer)) {
-                // Check minimum booking amount
-                if (
-                  !offer.minBookingAmount ||
-                  totalPrice >= offer.minBookingAmount
-                ) {
-                  // Check bus applicability
-                  const isAdminCoupon =
-                    offer.creatorRole === OfferCreatorRole.ADMIN;
+          if (trip.status === "CANCELLED" || trip.status === "COMPLETED") {
+            throw new Error("Trip is not available for booking");
+          }
 
-                  if (
-                    (!isAdminCoupon || trip.bus.adminId === offer.createdBy) &&
-                    (offer.applicableBuses.length === 0 ||
-                      offer.applicableBuses.includes(trip.busId))
-                  ) {
-                    // Calculate discount
-                    discountAmount = calculateDiscountAmount(
-                      offer,
-                      totalPrice
+          // ✅ VALIDATION: Check if trip date/time has already passed
+          const now = new Date();
+          const tripDate = new Date(trip.tripDate);
+          tripDate.setHours(0, 0, 0, 0); // Normalize to start of day
+
+          const today = new Date();
+          today.setHours(0, 0, 0, 0); // Normalize to start of day
+
+          // Check if trip date is in the past
+          if (tripDate < today) {
+            throw new Error("Cannot book tickets for past dates");
+          }
+
+          // If trip is today, check if departure time has passed
+          if (tripDate.getTime() === today.getTime()) {
+            // Get the from stop to check departure time
+            const tempFromStop = trip.bus.stops.find(
+              (s) => s.id === fromStopId
+            );
+            if (tempFromStop && tempFromStop.departureTime) {
+              try {
+                const timeParts = tempFromStop.departureTime
+                  .split(":")
+                  .map(Number);
+                const hours = timeParts[0];
+                const minutes = timeParts[1];
+
+                if (hours !== undefined && minutes !== undefined) {
+                  const departureDateTime = new Date(tripDate);
+                  departureDateTime.setHours(hours, minutes, 0, 0);
+
+                  if (departureDateTime <= now) {
+                    throw new Error(
+                      "Cannot book tickets for buses that have already departed"
                     );
+                  }
+                }
+              } catch (err: any) {
+                if (err.message.includes("already departed")) {
+                  throw err;
+                }
+                // Ignore time parsing errors
+              }
+            }
+          }
 
-                    finalPrice = Math.max(0, totalPrice - discountAmount);
-                    appliedOffer = offer;
+          // 2. Verify stops exist and are in correct order
+          const fromStop = trip.bus.stops.find((s) => s.id === fromStopId);
+          const toStop = trip.bus.stops.find((s) => s.id === toStopId);
 
-                    // Increment usage count
-                    await tx.offer.update({
-                      where: { id: offer.id },
-                      data: { usageCount: { increment: 1 } },
-                    });
+          if (!fromStop || !toStop) {
+            throw new Error("Stops not found");
+          }
+
+          // Allow both forward and return trips
+          if (fromStop.stopIndex === toStop.stopIndex) {
+            throw new Error("From and to stops cannot be the same");
+          }
+
+          const boardingPoint = await tx.stopPoint.findUnique({
+            where: { id: boardingPointId },
+          });
+
+          if (!boardingPoint || boardingPoint.stopId !== fromStopId) {
+            throw new Error("Invalid boarding point selected");
+          }
+
+          if (boardingPoint.type !== "BOARDING") {
+            throw new Error(
+              "Selected boarding point is not valid for boarding"
+            );
+          }
+
+          const droppingPoint = await tx.stopPoint.findUnique({
+            where: { id: droppingPointId },
+          });
+
+          if (!droppingPoint || droppingPoint.stopId !== toStopId) {
+            throw new Error("Invalid dropping point selected");
+          }
+
+          // 3. Verify all seats exist and belong to this bus
+          const seats = await tx.seat.findMany({
+            where: {
+              id: { in: seatIds },
+              busId: trip.busId,
+              isActive: true,
+            },
+          });
+
+          if (seats.length !== seatIds.length) {
+            throw new Error("One or more seats are invalid or inactive");
+          }
+
+          // 4. Check if any seat is already booked for overlapping segments
+          // ✅ IMPORTANT: This check runs inside transaction, so it will see the latest state
+          // and prevent race conditions for concurrent booking attempts
+          const existingBookings = await tx.booking.findMany({
+            where: {
+              tripId,
+              seatId: { in: seatIds },
+              status: "CONFIRMED",
+            },
+            include: {
+              group: {
+                select: {
+                  fromStop: { select: { stopIndex: true } },
+                  toStop: { select: { stopIndex: true } },
+                },
+              },
+            },
+          });
+
+          // Check for overlaps - a seat is occupied if ANY existing booking overlaps with requested journey
+          const minIndex = Math.min(fromStop.stopIndex, toStop.stopIndex);
+          const maxIndex = Math.max(fromStop.stopIndex, toStop.stopIndex);
+
+          const conflictingBookings = existingBookings.filter((booking) => {
+            const bookingFromIdx = booking.group.fromStop.stopIndex;
+            const bookingToIdx = booking.group.toStop.stopIndex;
+            const bookingMin = Math.min(bookingFromIdx, bookingToIdx);
+            const bookingMax = Math.max(bookingFromIdx, bookingToIdx);
+
+            // Two segments overlap if: segment1.start < segment2.end AND segment1.end > segment2.start
+            // This works for both forward and return trips
+            return minIndex < bookingMax && maxIndex > bookingMin;
+          });
+
+          if (conflictingBookings.length > 0) {
+            const conflictedSeats = conflictingBookings
+              .map((b) => {
+                const seat = seats.find((s) => s.id === b.seatId);
+                return seat?.seatNumber || b.seatId;
+              })
+              .join(", ");
+
+            throw new Error(
+              `Seat(s) ${conflictedSeats} are already booked for this route segment. Please select different seats.`
+            );
+          }
+
+          // 5. Calculate total price
+          const farePerSeat = Math.abs(
+            toStop.priceFromOrigin - fromStop.priceFromOrigin
+          );
+          const totalPrice = farePerSeat * seatIds.length;
+
+          // 6. Apply coupon if provided
+          let appliedOffer = null;
+          let discountAmount = 0;
+          let finalPrice = totalPrice;
+
+          if (couponCode) {
+            const offer = await tx.offer.findUnique({
+              where: { code: couponCode.toUpperCase() },
+            });
+
+            if (offer && offer.isActive) {
+              const now = new Date();
+
+              // Check validity period
+              if (now >= offer.validFrom && now <= offer.validUntil) {
+                // Check usage limit
+                if (hasRemainingUsage(offer)) {
+                  // Check minimum booking amount
+                  if (
+                    !offer.minBookingAmount ||
+                    totalPrice >= offer.minBookingAmount
+                  ) {
+                    // Check bus applicability
+                    const isAdminCoupon =
+                      offer.creatorRole === OfferCreatorRole.ADMIN;
+
+                    if (
+                      (!isAdminCoupon ||
+                        trip.bus.adminId === offer.createdBy) &&
+                      (offer.applicableBuses.length === 0 ||
+                        offer.applicableBuses.includes(trip.busId))
+                    ) {
+                      // Calculate discount
+                      discountAmount = calculateDiscountAmount(
+                        offer,
+                        totalPrice
+                      );
+
+                      finalPrice = Math.max(0, totalPrice - discountAmount);
+                      appliedOffer = offer;
+
+                      // Increment usage count
+                      await tx.offer.update({
+                        where: { id: offer.id },
+                        data: { usageCount: { increment: 1 } },
+                      });
+                    }
                   }
                 }
               }
             }
           }
-        }
 
-        // 7. Create booking group
-        const bookingGroup = await tx.bookingGroup.create({
-          data: {
-            userId,
-            tripId,
-            fromStopId,
-            toStopId,
+          // 7. Create booking group
+          const bookingGroup = await tx.bookingGroup.create({
+            data: {
+              userId,
+              tripId,
+              fromStopId,
+              toStopId,
+              totalPrice,
+              offerId: appliedOffer?.id || null,
+              discountAmount,
+              finalPrice,
+              boardingPointId: boardingPoint.id,
+              droppingPointId: droppingPoint.id,
+              status: "CONFIRMED",
+            },
+          });
+
+          // 8. Create individual bookings for each seat
+          const bookings = await Promise.all(
+            seatIds.map((seatId: string) =>
+              tx.booking.create({
+                data: {
+                  groupId: bookingGroup.id,
+                  tripId,
+                  seatId,
+                  status: "CONFIRMED",
+                },
+              })
+            )
+          );
+
+          // 9. Create passenger records for each booking
+          const passengerRecords = await Promise.all(
+            bookings.map((booking) => {
+              const passengerData = passengers.find(
+                (p: any) => p.seatId === booking.seatId
+              );
+              return tx.passenger.create({
+                data: {
+                  bookingId: booking.id,
+                  name: passengerData.name,
+                  age: passengerData.age,
+                  gender: passengerData.gender,
+                  phone: passengerData.phone || "",
+                  email: passengerData.email,
+                },
+              });
+            })
+          );
+
+          return {
+            bookingGroup,
+            bookings,
+            passengers: passengerRecords,
+            seats,
+            fromStop,
+            toStop,
+            boardingPoint,
+            droppingPoint,
             totalPrice,
-            offerId: appliedOffer?.id || null,
             discountAmount,
             finalPrice,
-            boardingPointId: boardingPoint.id,
-            droppingPointId: droppingPoint.id,
-            status: "CONFIRMED",
-          },
-        });
-
-        // 8. Create individual bookings for each seat
-        const bookings = await Promise.all(
-          seatIds.map((seatId: string) =>
-            tx.booking.create({
-              data: {
-                groupId: bookingGroup.id,
-                tripId,
-                seatId,
-                status: "CONFIRMED",
-              },
-            })
-          )
-        );
-
-        // 9. Create passenger records for each booking
-        const passengerRecords = await Promise.all(
-          bookings.map((booking) => {
-            const passengerData = passengers.find(
-              (p: any) => p.seatId === booking.seatId
-            );
-            return tx.passenger.create({
-              data: {
-                bookingId: booking.id,
-                name: passengerData.name,
-                age: passengerData.age,
-                gender: passengerData.gender,
-                phone: passengerData.phone || "",
-                email: passengerData.email,
-              },
-            });
-          })
-        );
-
-        return {
-          bookingGroup,
-          bookings,
-          passengers: passengerRecords,
-          seats,
-          fromStop,
-          toStop,
-          boardingPoint,
-          droppingPoint,
-          totalPrice,
-          discountAmount,
-          finalPrice,
-          appliedOffer,
-        };
-      }, {
-        maxWait: 15000, // Wait up to 15 seconds for transaction slot
-        timeout: 30000, // Allow up to 30 seconds for booking transaction
-      });
+            appliedOffer,
+          };
+        },
+        {
+          maxWait: 15000, // Wait up to 15 seconds for transaction slot
+          timeout: 30000, // Allow up to 30 seconds for booking transaction
+        }
+      );
 
       // Get user details for notification
       const user = await prisma.user.findUnique({
@@ -1671,20 +1699,21 @@ userRouter.post(
       });
     } catch (e: any) {
       console.error("Error booking ticket:", e);
-      
+
       // Handle specific Prisma errors
-      if (e.code === 'P2003') {
+      if (e.code === "P2003") {
         return res.status(401).json({
-          errorMessage: "User authentication error. Please sign out and sign in again.",
+          errorMessage:
+            "User authentication error. Please sign out and sign in again.",
         });
       }
-      
-      if (e.code === 'P2025') {
+
+      if (e.code === "P2025") {
         return res.status(404).json({
           errorMessage: "Trip or seat not found",
         });
       }
-      
+
       return res.status(500).json({
         errorMessage: e.message || "Failed to book ticket",
       });
@@ -1862,6 +1891,26 @@ userRouter.get(
               arrivalTime: true,
             },
           },
+          boardingPoint: {
+            select: {
+              name: true,
+              landmark: true,
+              time: true,
+            },
+          },
+          droppingPoint: {
+            select: {
+              name: true,
+              landmark: true,
+              time: true,
+            },
+          },
+          offer: {
+            select: {
+              code: true,
+              description: true,
+            },
+          },
           bookings: {
             include: {
               seat: {
@@ -1879,10 +1928,18 @@ userRouter.get(
         },
       });
 
-      const formattedBookings = bookingGroups.map((group) => ({
+      const formattedBookings = bookingGroups.map((group: any) => ({
         bookingGroupId: group.id,
         status: group.status,
         totalPrice: group.totalPrice,
+        discountAmount: group.discountAmount || 0,
+        finalPrice: group.finalPrice || group.totalPrice,
+        coupon: group.offer
+          ? {
+              code: group.offer.code,
+              description: group.offer.description,
+            }
+          : null,
         bookedAt: group.createdAt,
         trip: {
           tripId: group.tripId,
@@ -1906,7 +1963,21 @@ userRouter.get(
             arrivalTime: group.toStop.arrivalTime,
           },
         },
-        seats: group.bookings.map((b) => ({
+        boardingPoint: group.boardingPoint
+          ? {
+              name: group.boardingPoint.name,
+              landmark: group.boardingPoint.landmark,
+              time: group.boardingPoint.time,
+            }
+          : null,
+        droppingPoint: group.droppingPoint
+          ? {
+              name: group.droppingPoint.name,
+              landmark: group.droppingPoint.landmark,
+              time: group.droppingPoint.time,
+            }
+          : null,
+        seats: group.bookings.map((b: any) => ({
           seatNumber: b.seat.seatNumber,
           type: b.seat.type,
           level: b.seat.level,
@@ -2375,10 +2446,7 @@ userRouter.get(
             },
           },
         },
-        orderBy: [
-          { creatorRole: "desc" },
-          { validUntil: "asc" },
-        ],
+        orderBy: [{ creatorRole: "desc" }, { validUntil: "asc" }],
       });
 
       const coupons = offers
@@ -2543,16 +2611,31 @@ userRouter.get("/offers", async (req, res): Promise<any> => {
         validFrom: { lte: now },
         validUntil: { gte: now },
       },
-      orderBy: [
-        { creatorRole: "desc" },
-        { createdAt: "desc" },
-      ],
+      orderBy: [{ creatorRole: "desc" }, { createdAt: "desc" }],
       take: 10,
     });
 
+    // Enrich offers with bus service name for admin-created offers
+    const enrichedOffers = await Promise.all(
+      offers.map(async (offer) => {
+        if (offer.creatorRole === "ADMIN") {
+          // Fetch the admin user to get bus service name
+          const admin = await prisma.user.findUnique({
+            where: { id: offer.createdBy },
+            select: { busServiceName: true },
+          });
+          return {
+            ...offer,
+            busServiceName: admin?.busServiceName || "Unknown Service",
+          };
+        }
+        return offer;
+      })
+    );
+
     return res.status(200).json({
       message: "Offers fetched successfully",
-      offers,
+      offers: enrichedOffers,
     });
   } catch (error) {
     console.error("Error fetching offers:", error);

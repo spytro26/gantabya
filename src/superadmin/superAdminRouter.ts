@@ -339,7 +339,9 @@ superAdminRouter.post(
     } = req.body;
 
     if (!superAdminId) {
-      return res.status(401).json({ errorMessage: "Super admin not authenticated" });
+      return res
+        .status(401)
+        .json({ errorMessage: "Super admin not authenticated" });
     }
 
     try {
@@ -412,10 +414,7 @@ superAdminRouter.get(
             },
           },
         },
-        orderBy: [
-          { creatorRole: "desc" },
-          { createdAt: "desc" },
-        ],
+        orderBy: [{ creatorRole: "desc" }, { createdAt: "desc" }],
       });
 
       const offersWithUsage = offers.map(mapOfferWithUsage);
@@ -540,7 +539,9 @@ superAdminRouter.delete(
       });
     } catch (error) {
       console.error("Error deactivating offer:", error);
-      return res.status(500).json({ errorMessage: "Failed to deactivate offer" });
+      return res
+        .status(500)
+        .json({ errorMessage: "Failed to deactivate offer" });
     }
   }
 );

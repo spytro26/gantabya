@@ -9,13 +9,13 @@ datasource db {
 
 // ==================== USER MODEL ====================
 model User {
-  id       String  @id @default(uuid())
-  name     String
-  email    String  @unique
-  password String
-  verified Boolean @default(false) // Email verification for users, admin approval for admins
-  phone    String? // Added for notifications
-  busServiceName String @default("Ankush Travels") // Display name for admin's bus service
+  id             String  @id @default(uuid())
+  name           String
+  email          String  @unique
+  password       String
+  verified       Boolean @default(false) // Email verification for users, admin approval for admins
+  phone          String? // Added for notifications
+  busServiceName String  @default("Ankush Travels") // Display name for admin's bus service
 
   role                Role           @default(USER)
   adminVerified       Boolean        @default(false) // Only for ADMIN role - verified by super admin
@@ -122,8 +122,8 @@ model Stop {
   upperSleeperPrice Float @default(0) // Price for upper deck sleeper from origin to this stop
 
   // Relations
-  groupsFrom BookingGroup[] @relation("GroupFromStop")
-  groupsTo   BookingGroup[] @relation("GroupToStop")
+  groupsFrom     BookingGroup[] @relation("GroupFromStop")
+  groupsTo       BookingGroup[] @relation("GroupToStop")
   boardingPoints StopPoint[]
 
   @@unique([busId, stopIndex])
@@ -230,10 +230,10 @@ model BookingGroup {
   status     GroupStatus @default(PENDING)
 
   // Offer/Coupon fields
-  offerId        String?
-  offer          Offer?  @relation(fields: [offerId], references: [id])
-  discountAmount Float   @default(0)
-  finalPrice     Float? // totalPrice - discountAmount
+  offerId         String?
+  offer           Offer?     @relation(fields: [offerId], references: [id])
+  discountAmount  Float      @default(0)
+  finalPrice      Float? // totalPrice - discountAmount
   boardingPointId String?
   boardingPoint   StopPoint? @relation("GroupBoardingPoint", fields: [boardingPointId], references: [id], onDelete: SetNull)
   droppingPointId String?
@@ -321,8 +321,8 @@ model BusAmenities {
 
 // ==================== OFFERS & COUPONS MODEL ====================
 model Offer {
-  id               String         @id @default(uuid())
-  code             String         @unique
+  id               String           @id @default(uuid())
+  code             String           @unique
   description      String
   discountType     DiscountType
   discountValue    Float // percentage or fixed amount
@@ -331,13 +331,13 @@ model Offer {
   validFrom        DateTime
   validUntil       DateTime
   usageLimit       Int? // null = unlimited
-  usageCount       Int            @default(0)
-  isActive         Boolean        @default(true)
+  usageCount       Int              @default(0)
+  isActive         Boolean          @default(true)
   applicableBuses  String[] // Array of bus IDs, empty = all buses
   createdBy        String // Admin or super admin ID
   creatorRole      OfferCreatorRole @default(ADMIN)
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
   bookingGroups    BookingGroup[]
 
   @@index([code])

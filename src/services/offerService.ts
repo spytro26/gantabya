@@ -1,9 +1,5 @@
 import { prisma } from "../index.js";
-import {
-  DiscountType,
-  OfferCreatorRole,
-  Prisma,
-} from "@prisma/client";
+import { DiscountType, OfferCreatorRole, Prisma } from "@prisma/client";
 
 export interface OfferPayload {
   code: string;
@@ -118,10 +114,7 @@ async function resolveApplicableBuses(
   return sanitizeApplicableBusesForAdmin(payload.applicableBuses, actor.id);
 }
 
-export async function createOffer(
-  payload: OfferPayload,
-  actor: OfferActor
-) {
+export async function createOffer(payload: OfferPayload, actor: OfferActor) {
   if (!payload.code || !payload.code.trim()) {
     throw new OfferValidationError("Coupon code is required");
   }
@@ -159,9 +152,7 @@ export async function createOffer(
     payload.discountType === DiscountType.PERCENTAGE &&
     payload.discountValue > 100
   ) {
-    throw new OfferValidationError(
-      "Percentage discount cannot exceed 100%"
-    );
+    throw new OfferValidationError("Percentage discount cannot exceed 100%");
   }
 
   if (
@@ -177,9 +168,7 @@ export async function createOffer(
   const validUntilDate = parseDate(payload.validUntil, "Valid until");
 
   if (validUntilDate <= validFromDate) {
-    throw new OfferValidationError(
-      "Valid until must be later than valid from"
-    );
+    throw new OfferValidationError("Valid until must be later than valid from");
   }
 
   const cleanedCode = payload.code.trim().toUpperCase();
@@ -227,9 +216,7 @@ export function mapOfferWithUsage(offer: any) {
 
 export function handleOfferError(error: unknown, res: any) {
   if (error instanceof OfferValidationError) {
-    return res
-      .status(error.statusCode)
-      .json({ errorMessage: error.message });
+    return res.status(error.statusCode).json({ errorMessage: error.message });
   }
 
   if (error instanceof Prisma.PrismaClientKnownRequestError) {

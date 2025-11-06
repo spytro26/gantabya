@@ -361,9 +361,7 @@ adminRouter.put(
         : "";
 
     if (!normalizedServiceName) {
-      return res
-        .status(400)
-        .json({ errorMessage: "Service name is required" });
+      return res.status(400).json({ errorMessage: "Service name is required" });
     }
 
     if (normalizedServiceName.length < 3) {
@@ -845,15 +843,16 @@ adminRouter.post(
       });
     } catch (e: any) {
       console.error("Error saving seat layout:", e);
-      
+
       // Handle foreign key constraint error
-      if (e.code === 'P2003') {
+      if (e.code === "P2003") {
         return res.status(400).json({
-          errorMessage: "Cannot modify seat layout because some seats have active bookings. Please ensure all bookings are cancelled first.",
+          errorMessage:
+            "Cannot modify seat layout because some seats have active bookings. Please ensure all bookings are cancelled first.",
           details: e.message,
         });
       }
-      
+
       return res.status(500).json({
         errorMessage: "Failed to save seat layout",
         details: e.message,
@@ -1044,76 +1043,81 @@ adminRouter.post(
 
       // Use transaction to delete old stops and create new ones
       // Increased timeout for routes with many stops and boarding points
-      const result = await prisma.$transaction(async (tx) => {
-        // Delete existing stops for this bus
-        await tx.stop.deleteMany({
-          where: { busId },
-        });
+      const result = await prisma.$transaction(
+        async (tx) => {
+          // Delete existing stops for this bus
+          await tx.stop.deleteMany({
+            where: { busId },
+          });
 
-        // Create new stops with proper indexing
-        const createdStops = await Promise.all(
-          stops.map((stop: any, index: number) =>
-            tx.stop.create({
-              data: {
-                busId,
-                name: stop.name,
-                city: stop.city,
-                state: stop.state || null,
-                stopIndex: index,
-                arrivalTime: index === 0 ? null : stop.arrivalTime,
-                departureTime:
-                  index === stops.length - 1 ? null : stop.departureTime,
-                returnArrivalTime:
-                  index === stops.length - 1
-                    ? null
-                    : stop.returnArrivalTime || null,
-                returnDepartureTime:
-                  index === 0 ? null : stop.returnDepartureTime || null,
-                distanceFromOrigin:
-                  typeof stop.distanceFromOrigin === "number"
-                    ? stop.distanceFromOrigin
-                    : Number(stop.distanceFromOrigin) || 0,
-                priceFromOrigin:
-                  typeof stop.priceFromOrigin === "number"
-                    ? stop.priceFromOrigin
-                    : Number(stop.priceFromOrigin) || 0,
-                lowerSeaterPrice:
-                  typeof stop.lowerSeaterPrice === "number"
-                    ? stop.lowerSeaterPrice
-                    : Number(stop.lowerSeaterPrice) || 0,
-                lowerSleeperPrice:
-                  typeof stop.lowerSleeperPrice === "number"
-                    ? stop.lowerSleeperPrice
-                    : Number(stop.lowerSleeperPrice) || 0,
-                upperSleeperPrice:
-                  typeof stop.upperSleeperPrice === "number"
-                    ? stop.upperSleeperPrice
-                    : Number(stop.upperSleeperPrice) || 0,
-                boardingPoints: {
-                  create: stop.boardingPoints.map((point: any, pointIndex: number) => ({
-                    type: "BOARDING",
-                    name: point.name,
-                    time: point.time,
-                    landmark: point.landmark || null,
-                    address: point.address || null,
-                    pointOrder: pointIndex,
-                  })),
+          // Create new stops with proper indexing
+          const createdStops = await Promise.all(
+            stops.map((stop: any, index: number) =>
+              tx.stop.create({
+                data: {
+                  busId,
+                  name: stop.name,
+                  city: stop.city,
+                  state: stop.state || null,
+                  stopIndex: index,
+                  arrivalTime: index === 0 ? null : stop.arrivalTime,
+                  departureTime:
+                    index === stops.length - 1 ? null : stop.departureTime,
+                  returnArrivalTime:
+                    index === stops.length - 1
+                      ? null
+                      : stop.returnArrivalTime || null,
+                  returnDepartureTime:
+                    index === 0 ? null : stop.returnDepartureTime || null,
+                  distanceFromOrigin:
+                    typeof stop.distanceFromOrigin === "number"
+                      ? stop.distanceFromOrigin
+                      : Number(stop.distanceFromOrigin) || 0,
+                  priceFromOrigin:
+                    typeof stop.priceFromOrigin === "number"
+                      ? stop.priceFromOrigin
+                      : Number(stop.priceFromOrigin) || 0,
+                  lowerSeaterPrice:
+                    typeof stop.lowerSeaterPrice === "number"
+                      ? stop.lowerSeaterPrice
+                      : Number(stop.lowerSeaterPrice) || 0,
+                  lowerSleeperPrice:
+                    typeof stop.lowerSleeperPrice === "number"
+                      ? stop.lowerSleeperPrice
+                      : Number(stop.lowerSleeperPrice) || 0,
+                  upperSleeperPrice:
+                    typeof stop.upperSleeperPrice === "number"
+                      ? stop.upperSleeperPrice
+                      : Number(stop.upperSleeperPrice) || 0,
+                  boardingPoints: {
+                    create: stop.boardingPoints.map(
+                      (point: any, pointIndex: number) => ({
+                        type: "BOARDING",
+                        name: point.name,
+                        time: point.time,
+                        landmark: point.landmark || null,
+                        address: point.address || null,
+                        pointOrder: pointIndex,
+                      })
+                    ),
+                  },
                 },
-              },
-              include: {
-                boardingPoints: {
-                  orderBy: { pointOrder: "asc" },
+                include: {
+                  boardingPoints: {
+                    orderBy: { pointOrder: "asc" },
+                  },
                 },
-              },
-            })
-          )
-        );
+              })
+            )
+          );
 
-        return createdStops;
-      }, {
-        maxWait: 10000, // Wait up to 10 seconds for transaction slot
-        timeout: 20000, // Allow up to 20 seconds for transaction to complete
-      });
+          return createdStops;
+        },
+        {
+          maxWait: 10000, // Wait up to 10 seconds for transaction slot
+          timeout: 20000, // Allow up to 20 seconds for transaction to complete
+        }
+      );
 
       return res.status(200).json({
         message: "Stops added successfully",
@@ -2905,8 +2909,7 @@ adminRouter.patch(
         if (parsedMinBooking !== null) {
           if (Number.isNaN(parsedMinBooking) || parsedMinBooking <= 0) {
             return res.status(400).json({
-              errorMessage:
-                "Minimum booking amount must be a positive number",
+              errorMessage: "Minimum booking amount must be a positive number",
             });
           }
         }

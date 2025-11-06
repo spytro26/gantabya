@@ -16,7 +16,11 @@ async function main() {
   console.log(`Found ${images.length} images`);
   for (const image of images) {
     console.log(
-      `${image.id} | busId=${image.busId} | uploaded=${image.createdAt.toISOString()}\n  url=${image.imageUrl}\n  publicId=${image.publicId}`
+      `${image.id} | busId=${
+        image.busId
+      } | uploaded=${image.createdAt.toISOString()}\n  url=${
+        image.imageUrl
+      }\n  publicId=${image.publicId}`
     );
   }
 }
