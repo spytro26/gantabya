@@ -7,6 +7,13 @@ import { sendGmail } from "../user/sendmail.js";
 import multer from "multer";
 import cloudinary from "../config/cloudinary.js";
 import "dotenv/config";
+import {
+  createOffer,
+  handleOfferError,
+  mapOfferWithUsage,
+  sanitizeApplicableBusesForAdmin,
+} from "../services/offerService.js";
+import { DiscountType, OfferCreatorRole } from "@prisma/client";
 
 const JWT_SECRET = process.env.adminSecret || process.env.userSecret;
 const app = express();
@@ -57,19 +64,41 @@ const authenticateAdmin = async (req: AuthRequest, res: any, next: any) => {
   }
 };
 
+const parseOptionalNumber = (value: unknown): number | null => {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return parsed;
+};
+
+const parseOptionalStringArray = (value: unknown): string[] | null => {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  return value.map((item) => String(item));
+};
+
 adminRouter.get("/", async (req, res) => {
   return res.status(200).json({ message: "Welcome to the admin router" });
 });
 
 // Admin Signup endpoint (Step 1: Create account and send OTP)
 adminRouter.post("/signup", async (req, res): Promise<any> => {
-  const { name, email, password } = req.body;
+  const { name, email, password, busServiceName } = req.body;
 
   if (!name || !email || !password) {
     return res.status(400).json({
       errorMessage: "Name, email, and password are required",
     });
   }
+
+  const normalizedServiceName =
+    typeof busServiceName === "string" && busServiceName.trim().length > 0
+      ? busServiceName.trim()
+      : "Ankush Travels";
 
   // Validate email format
   const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -108,6 +137,7 @@ adminRouter.post("/signup", async (req, res): Promise<any> => {
         role: "ADMIN",
         verified: false, // Email not verified yet
         adminVerified: false, // Super admin verification pending
+        busServiceName: normalizedServiceName,
       },
     });
 
@@ -132,6 +162,7 @@ adminRouter.post("/signup", async (req, res): Promise<any> => {
         name: user.name,
         email: user.email,
         role: user.role,
+        busServiceName: user.busServiceName,
       },
     });
   } catch (error) {
@@ -263,6 +294,7 @@ adminRouter.post("/signin", async (req, res): Promise<any> => {
         email: user.email,
         role: user.role,
         adminVerified: user.adminVerified, // Frontend will use this to show verification status
+        busServiceName: user.busServiceName,
       },
     });
   } catch (error) {
@@ -293,6 +325,7 @@ adminRouter.get(
           verified: true,
           adminVerified: true,
           role: true,
+          busServiceName: true,
         },
       });
 
@@ -306,6 +339,95 @@ adminRouter.get(
       });
     } catch (error) {
       return res.status(401).json({ errorMessage: "Invalid or expired token" });
+    }
+  }
+);
+
+// Update bus service name
+adminRouter.put(
+  "/profile/service-name",
+  authenticateAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    const adminId = req.adminId;
+    const { serviceName } = req.body;
+
+    if (!adminId) {
+      return res.status(401).json({ errorMessage: "Admin not authenticated" });
+    }
+
+    const normalizedServiceName =
+      typeof serviceName === "string" && serviceName.trim().length > 0
+        ? serviceName.trim()
+        : "";
+
+    if (!normalizedServiceName) {
+      return res
+        .status(400)
+        .json({ errorMessage: "Service name is required" });
+    }
+
+    if (normalizedServiceName.length < 3) {
+      return res.status(400).json({
+        errorMessage: "Service name must be at least 3 characters long",
+      });
+    }
+
+    try {
+      const updated = await prisma.user.update({
+        where: { id: adminId },
+        data: {
+          busServiceName: normalizedServiceName,
+        },
+        select: {
+          busServiceName: true,
+        },
+      });
+
+      return res.status(200).json({
+        message: "Service name updated successfully",
+        serviceName: updated.busServiceName,
+      });
+    } catch (error) {
+      console.error("Error updating service name:", error);
+      return res
+        .status(500)
+        .json({ errorMessage: "Failed to update service name" });
+    }
+  }
+);
+
+adminRouter.get(
+  "/profile/service-name",
+  authenticateAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    const adminId = req.adminId;
+
+    if (!adminId) {
+      return res.status(401).json({ errorMessage: "Admin not authenticated" });
+    }
+
+    try {
+      const admin = await prisma.user.findUnique({
+        where: { id: adminId },
+        select: {
+          busServiceName: true,
+          name: true,
+        },
+      });
+
+      if (!admin) {
+        return res.status(404).json({ errorMessage: "Admin not found" });
+      }
+
+      return res.status(200).json({
+        serviceName: admin.busServiceName || "Ankush Travels",
+        adminName: admin.name,
+      });
+    } catch (error) {
+      console.error("Error fetching service name:", error);
+      return res
+        .status(500)
+        .json({ errorMessage: "Failed to fetch service name" });
     }
   }
 );
@@ -895,6 +1017,7 @@ adminRouter.post(
       }
 
       // Use transaction to delete old stops and create new ones
+      // Increased timeout for routes with many stops and boarding points
       const result = await prisma.$transaction(async (tx) => {
         // Delete existing stops for this bus
         await tx.stop.deleteMany({
@@ -920,17 +1043,50 @@ adminRouter.post(
                     : stop.returnArrivalTime || null,
                 returnDepartureTime:
                   index === 0 ? null : stop.returnDepartureTime || null,
-                distanceFromOrigin: stop.distanceFromOrigin || 0,
-                priceFromOrigin: stop.priceFromOrigin || 0,
-                lowerSeaterPrice: stop.lowerSeaterPrice || 0,
-                lowerSleeperPrice: stop.lowerSleeperPrice || 0,
-                upperSleeperPrice: stop.upperSleeperPrice || 0,
+                distanceFromOrigin:
+                  typeof stop.distanceFromOrigin === "number"
+                    ? stop.distanceFromOrigin
+                    : Number(stop.distanceFromOrigin) || 0,
+                priceFromOrigin:
+                  typeof stop.priceFromOrigin === "number"
+                    ? stop.priceFromOrigin
+                    : Number(stop.priceFromOrigin) || 0,
+                lowerSeaterPrice:
+                  typeof stop.lowerSeaterPrice === "number"
+                    ? stop.lowerSeaterPrice
+                    : Number(stop.lowerSeaterPrice) || 0,
+                lowerSleeperPrice:
+                  typeof stop.lowerSleeperPrice === "number"
+                    ? stop.lowerSleeperPrice
+                    : Number(stop.lowerSleeperPrice) || 0,
+                upperSleeperPrice:
+                  typeof stop.upperSleeperPrice === "number"
+                    ? stop.upperSleeperPrice
+                    : Number(stop.upperSleeperPrice) || 0,
+                boardingPoints: {
+                  create: stop.boardingPoints.map((point: any, pointIndex: number) => ({
+                    type: "BOARDING",
+                    name: point.name,
+                    time: point.time,
+                    landmark: point.landmark || null,
+                    address: point.address || null,
+                    pointOrder: pointIndex,
+                  })),
+                },
+              },
+              include: {
+                boardingPoints: {
+                  orderBy: { pointOrder: "asc" },
+                },
               },
             })
           )
         );
 
         return createdStops;
+      }, {
+        maxWait: 10000, // Wait up to 10 seconds for transaction slot
+        timeout: 20000, // Allow up to 20 seconds for transaction to complete
       });
 
       return res.status(200).json({
@@ -968,6 +1124,12 @@ adminRouter.get(
         include: {
           stops: {
             orderBy: { stopIndex: "asc" },
+            include: {
+              boardingPoints: {
+                where: { type: "BOARDING" },
+                orderBy: { pointOrder: "asc" },
+              },
+            },
           },
         },
       });
@@ -1727,6 +1889,14 @@ adminRouter.get(
     }
 
     try {
+      const adminProfile = await prisma.user.findUnique({
+        where: { id: adminId },
+        select: {
+          name: true,
+          busServiceName: true,
+        },
+      });
+
       // Get all buses count
       const totalBuses = await prisma.bus.count({
         where: { adminId },
@@ -1889,6 +2059,10 @@ adminRouter.get(
 
       return res.status(200).json({
         message: "Dashboard data fetched successfully",
+        serviceProfile: {
+          adminName: adminProfile?.name || "",
+          busServiceName: adminProfile?.busServiceName || "Ankush Travels",
+        },
         overview: {
           totalBuses,
           totalTrips,
@@ -2413,6 +2587,12 @@ adminRouter.post(
   "/offers",
   authenticateAdmin,
   async (req: AuthRequest, res): Promise<any> => {
+    const adminId = req.adminId;
+
+    if (!adminId) {
+      return res.status(401).json({ errorMessage: "Admin ID not found" });
+    }
+
     const {
       code,
       description,
@@ -2426,60 +2606,29 @@ adminRouter.post(
       applicableBuses,
     } = req.body;
 
-    if (
-      !code ||
-      !description ||
-      !discountType ||
-      !discountValue ||
-      !validFrom ||
-      !validUntil
-    ) {
-      return res.status(400).json({
-        errorMessage:
-          "Missing required fields: code, description, discountType, discountValue, validFrom, validUntil",
-      });
-    }
-
     try {
-      // Check if code already exists
-      const existingOffer = await prisma.offer.findUnique({
-        where: { code: code.toUpperCase() },
-      });
-
-      if (existingOffer) {
-        return res.status(409).json({
-          errorMessage: "An offer with this code already exists",
-        });
-      }
-
-      const adminId = req.adminId;
-      if (!adminId) {
-        return res.status(401).json({ errorMessage: "Admin ID not found" });
-      }
-
-      const offer = await prisma.offer.create({
-        data: {
-          code: code.toUpperCase(),
+      const offer = await createOffer(
+        {
+          code,
           description,
-          discountType,
-          discountValue,
-          maxDiscount: maxDiscount || null,
-          validFrom: new Date(validFrom),
-          validUntil: new Date(validUntil),
-          minBookingAmount: minBookingAmount || null,
-          usageLimit: usageLimit || null,
-          applicableBuses: applicableBuses || [],
-          createdBy: adminId,
+          discountType: discountType as DiscountType,
+          discountValue: Number(discountValue),
+          maxDiscount: parseOptionalNumber(maxDiscount),
+          validFrom,
+          validUntil,
+          minBookingAmount: parseOptionalNumber(minBookingAmount),
+          usageLimit: parseOptionalNumber(usageLimit),
+          applicableBuses: parseOptionalStringArray(applicableBuses),
         },
-      });
+        { id: adminId, role: OfferCreatorRole.ADMIN }
+      );
 
       return res.status(201).json({
         message: "Offer created successfully",
         offer,
       });
     } catch (error) {
-      console.error("Error creating offer:", error);
-      return res.status(500).json({ errorMessage: "Failed to create offer" });
+      return handleOfferError(error, res);
     }
   }
 );
@@ -2492,6 +2641,11 @@ adminRouter.get(
   "/offers",
   authenticateAdmin,
   async (req: AuthRequest, res): Promise<any> => {
+    const adminId = req.adminId;
+    if (!adminId) {
+      return res.status(401).json({ errorMessage: "Admin ID not found" });
+    }
+
     const { active, expired, search } = req.query;
 
     try {
@@ -2499,6 +2653,8 @@ adminRouter.get(
 
       const offers = await prisma.offer.findMany({
         where: {
+          createdBy: adminId,
+          creatorRole: OfferCreatorRole.ADMIN,
           ...(active === "true" && {
             isActive: true,
             validUntil: { gte: now },
@@ -2527,11 +2683,7 @@ adminRouter.get(
         },
       });
 
-      const offersWithUsage = offers.map((offer) => ({
-        ...offer,
-        usageCount: offer._count.bookingGroups,
-        _count: undefined,
-      }));
+      const offersWithUsage = offers.map(mapOfferWithUsage);
 
       return res.status(200).json({
         message: "Offers fetched successfully",
@@ -2554,9 +2706,14 @@ adminRouter.get(
   authenticateAdmin,
   async (req: AuthRequest, res): Promise<any> => {
     const { offerId } = req.params;
+    const adminId = req.adminId;
 
     if (!offerId) {
       return res.status(400).json({ errorMessage: "Offer ID is required" });
+    }
+
+    if (!adminId) {
+      return res.status(401).json({ errorMessage: "Admin not authenticated" });
     }
 
     try {
@@ -2595,6 +2752,15 @@ adminRouter.get(
         return res.status(404).json({ errorMessage: "Offer not found" });
       }
 
+      if (
+        offer.createdBy !== adminId ||
+        offer.creatorRole !== OfferCreatorRole.ADMIN
+      ) {
+        return res
+          .status(403)
+          .json({ errorMessage: "You can only view your own offers" });
+      }
+
       return res.status(200).json({
         message: "Offer details fetched successfully",
         offer: {
@@ -2621,6 +2787,7 @@ adminRouter.patch(
   authenticateAdmin,
   async (req: AuthRequest, res): Promise<any> => {
     const { offerId } = req.params;
+    const adminId = req.adminId;
     const {
       description,
       discountValue,
@@ -2637,20 +2804,139 @@ adminRouter.patch(
       return res.status(400).json({ errorMessage: "Offer ID is required" });
     }
 
+    if (!adminId) {
+      return res.status(401).json({ errorMessage: "Admin not authenticated" });
+    }
+
     try {
+      const existingOffer = await prisma.offer.findUnique({
+        where: { id: offerId },
+      });
+
+      if (!existingOffer) {
+        return res.status(404).json({ errorMessage: "Offer not found" });
+      }
+
+      if (
+        existingOffer.creatorRole !== OfferCreatorRole.ADMIN ||
+        existingOffer.createdBy !== adminId
+      ) {
+        return res
+          .status(403)
+          .json({ errorMessage: "You can only update your own offers" });
+      }
+
+      const updateData: Record<string, unknown> = {};
+
+      if (description) {
+        updateData.description = description;
+      }
+
+      if (discountValue !== undefined) {
+        const parsedDiscountValue = Number(discountValue);
+        if (Number.isNaN(parsedDiscountValue) || parsedDiscountValue <= 0) {
+          return res.status(400).json({
+            errorMessage: "Discount value must be a positive number",
+          });
+        }
+        updateData.discountValue = parsedDiscountValue;
+      }
+
+      if (maxDiscount !== undefined) {
+        const parsedMaxDiscount = parseOptionalNumber(maxDiscount);
+        if (parsedMaxDiscount !== null) {
+          if (Number.isNaN(parsedMaxDiscount) || parsedMaxDiscount <= 0) {
+            return res.status(400).json({
+              errorMessage: "Max discount must be a positive number",
+            });
+          }
+        }
+        updateData.maxDiscount = parsedMaxDiscount;
+      }
+
+      if (validFrom) {
+        const parsedValidFrom = new Date(validFrom);
+        if (Number.isNaN(parsedValidFrom.getTime())) {
+          return res
+            .status(400)
+            .json({ errorMessage: "Valid from must be a valid date" });
+        }
+        updateData.validFrom = parsedValidFrom;
+      }
+
+      if (validUntil) {
+        const parsedValidUntil = new Date(validUntil);
+        if (Number.isNaN(parsedValidUntil.getTime())) {
+          return res
+            .status(400)
+            .json({ errorMessage: "Valid until must be a valid date" });
+        }
+        updateData.validUntil = parsedValidUntil;
+      }
+
+      if (minBookingAmount !== undefined) {
+        const parsedMinBooking = parseOptionalNumber(minBookingAmount);
+        if (parsedMinBooking !== null) {
+          if (Number.isNaN(parsedMinBooking) || parsedMinBooking <= 0) {
+            return res.status(400).json({
+              errorMessage:
+                "Minimum booking amount must be a positive number",
+            });
+          }
+        }
+        updateData.minBookingAmount = parsedMinBooking;
+      }
+
+      if (usageLimit !== undefined) {
+        const parsedUsageLimit = parseOptionalNumber(usageLimit);
+        if (parsedUsageLimit !== null) {
+          if (
+            Number.isNaN(parsedUsageLimit) ||
+            parsedUsageLimit <= 0 ||
+            !Number.isInteger(parsedUsageLimit)
+          ) {
+            return res.status(400).json({
+              errorMessage: "Usage limit must be a positive whole number",
+            });
+          }
+        }
+        updateData.usageLimit = parsedUsageLimit;
+      }
+
+      if (applicableBuses !== undefined) {
+        try {
+          updateData.applicableBuses = await sanitizeApplicableBusesForAdmin(
+            parseOptionalStringArray(applicableBuses),
+            adminId
+          );
+        } catch (error) {
+          return handleOfferError(error, res);
+        }
+      }
+
+      if (typeof isActive === "boolean") {
+        updateData.isActive = isActive;
+      }
+
+      if (updateData.validFrom && updateData.validUntil) {
+        const validFromDate = updateData.validFrom as Date;
+        const validUntilDate = updateData.validUntil as Date;
+        if (validUntilDate <= validFromDate) {
+          return res.status(400).json({
+            errorMessage: "Valid until must be later than valid from",
+          });
+        }
+      }
+
+      if (Object.keys(updateData).length === 0) {
+        return res.status(400).json({
+          errorMessage: "No valid fields provided for update",
+        });
+      }
+
       const offer = await prisma.offer.update({
         where: { id: offerId },
-        data: {
-          ...(description && { description }),
-          ...(discountValue !== undefined && { discountValue }),
-          ...(maxDiscount !== undefined && { maxDiscount }),
-          ...(validFrom && { validFrom: new Date(validFrom) }),
-          ...(validUntil && { validUntil: new Date(validUntil) }),
-          ...(minBookingAmount !== undefined && { minBookingAmount }),
-          ...(usageLimit !== undefined && { usageLimit }),
-          ...(applicableBuses && { applicableBuses }),
-          ...(isActive !== undefined && { isActive }),
-        },
+        data: updateData,
       });
 
       return res.status(200).json({
@@ -2673,12 +2959,34 @@ adminRouter.delete(
   authenticateAdmin,
   async (req: AuthRequest, res): Promise<any> => {
     const { offerId } = req.params;
+    const adminId = req.adminId;
 
     if (!offerId) {
       return res.status(400).json({ errorMessage: "Offer ID is required" });
     }
 
+    if (!adminId) {
+      return res.status(401).json({ errorMessage: "Admin not authenticated" });
+    }
+
     try {
+      const existingOffer = await prisma.offer.findUnique({
+        where: { id: offerId },
+      });
+
+      if (!existingOffer) {
+        return res.status(404).json({ errorMessage: "Offer not found" });
+      }
+
+      if (
+        existingOffer.creatorRole !== OfferCreatorRole.ADMIN ||
+        existingOffer.createdBy !== adminId
+      ) {
+        return res
+          .status(403)
+          .json({ errorMessage: "You can only update your own offers" });
+      }
+
       const offer = await prisma.offer.update({
         where: { id: offerId },
         data: {
@@ -2708,9 +3016,14 @@ adminRouter.get(
   authenticateAdmin,
   async (req: AuthRequest, res): Promise<any> => {
     const { offerId } = req.params;
+    const adminId = req.adminId;
 
     if (!offerId) {
       return res.status(400).json({ errorMessage: "Offer ID is required" });
+    }
+
+    if (!adminId) {
+      return res.status(401).json({ errorMessage: "Admin not authenticated" });
     }
 
     try {
@@ -2720,6 +3033,15 @@ adminRouter.get(
 
       if (!offer) {
         return res.status(404).json({ errorMessage: "Offer not found" });
+      }
+
+      if (
+        offer.creatorRole !== OfferCreatorRole.ADMIN ||
+        offer.createdBy !== adminId
+      ) {
+        return res
+          .status(403)
+          .json({ errorMessage: "You can only view your own offers" });
       }
 
       const stats = await prisma.bookingGroup.aggregate({

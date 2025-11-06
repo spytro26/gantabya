@@ -30,6 +30,8 @@ export const bookTicketSchema = z.object({
       })
     )
     .min(1, "Passenger details required for all seats"),
+  boardingPointId: z.string().uuid("Invalid boarding point ID"),
+  droppingPointId: z.string().uuid("Invalid dropping point ID"),
   couponCode: z.string().optional(), // Optional coupon code
 });
 

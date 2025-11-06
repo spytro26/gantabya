@@ -27,6 +27,7 @@ import {
   applyCouponSchema,
   enhancedSearchSchema,
 } from "../schemas/busSearchSchema.js";
+import { DiscountType, OfferCreatorRole } from "@prisma/client";
 
 const JWT_SECRET = process.env.userSecret;
 const app = express();
@@ -57,6 +58,36 @@ const authenticateUser = async (req: AuthRequest, res: any, next: any) => {
   } catch (e) {
     return res.status(401).json({ errorMessage: "Invalid or expired token" });
   }
+};
+
+const calculateDiscountAmount = (
+  offer: {
+    discountType: DiscountType;
+    discountValue: number;
+    maxDiscount: number | null;
+  },
+  totalAmount: number
+) => {
+  let discount = 0;
+
+  if (offer.discountType === DiscountType.PERCENTAGE) {
+    discount = (totalAmount * offer.discountValue) / 100;
+    if (offer.maxDiscount) {
+      discount = Math.min(discount, offer.maxDiscount);
+    }
+  } else {
+    discount = offer.discountValue;
+  }
+
+  return Math.max(0, Math.min(discount, totalAmount));
+};
+
+const hasRemainingUsage = (offer: { usageLimit: number | null; usageCount: number }) => {
+  if (!offer.usageLimit) {
+    return true;
+  }
+
+  return offer.usageCount < offer.usageLimit;
 };
 userRouter.get("/", async (req, res) => {
   return res.status(402).json({ message: "welcome to the user router" });
@@ -581,6 +612,12 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
           include: {
             stops: {
               orderBy: { stopIndex: "asc" },
+              include: {
+                boardingPoints: {
+                  where: { type: "BOARDING" },
+                  orderBy: { pointOrder: "asc" },
+                },
+              },
             },
             amenities: true,
             images: {
@@ -683,7 +720,7 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
           }
         }
 
-        // Calculate available seats (logic works for both directions)
+        // Calculate available seats (direction-aware logic)
         const totalSeats = trip.bus.totalSeats;
         const minIndex = Math.min(fromStop.stopIndex, toStop.stopIndex);
         const maxIndex = Math.max(fromStop.stopIndex, toStop.stopIndex);
@@ -693,10 +730,19 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
             .filter((booking) => {
               const bookingFromIdx = booking.group.fromStop.stopIndex;
               const bookingToIdx = booking.group.toStop.stopIndex;
+              
+              // ✅ CRITICAL FIX: Check if booking is in the SAME DIRECTION
+              const bookingIsReturnTrip = bookingFromIdx > bookingToIdx;
+              
+              // Skip bookings in opposite direction
+              if (bookingIsReturnTrip !== isReturnTrip) {
+                return false;
+              }
+              
               const bookingMin = Math.min(bookingFromIdx, bookingToIdx);
               const bookingMax = Math.max(bookingFromIdx, bookingToIdx);
 
-              // Check if segments overlap
+              // Check if segments overlap (only for same direction)
               return minIndex < bookingMax && maxIndex > bookingMin;
             })
             .map((b) => b.seatId)
@@ -758,6 +804,14 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
             city: fromStop.city,
             departureTime: departureTime,
             stopIndex: fromStop.stopIndex,
+            boardingPoints: (fromStop.boardingPoints || []).map((point) => ({
+              id: point.id,
+              name: point.name,
+              time: point.time,
+              landmark: point.landmark,
+              address: point.address,
+              pointOrder: point.pointOrder,
+            })),
           },
           toStop: {
             id: toStop.id,
@@ -765,6 +819,14 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
             city: toStop.city,
             arrivalTime: arrivalTime,
             stopIndex: toStop.stopIndex,
+            boardingPoints: (toStop.boardingPoints || []).map((point) => ({
+              id: point.id,
+              name: point.name,
+              time: point.time,
+              landmark: point.landmark,
+              address: point.address,
+              pointOrder: point.pointOrder,
+            })),
           },
           availableSeats,
           totalSeats,
@@ -786,7 +848,6 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
                 hasTV: trip.bus.amenities.hasTV,
               }
             : null,
-          images: trip.bus.images || [],
         };
       })
       .filter((trip) => trip !== null);
@@ -942,6 +1003,11 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
           include: {
             stops: {
               orderBy: { stopIndex: "asc" },
+              include: {
+                boardingPoints: {
+                  orderBy: { pointOrder: "asc" },
+                },
+              },
             },
             seats: {
               where: { isActive: true },
@@ -1007,16 +1073,51 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
     const isReturnTrip = fromStop.stopIndex > toStop.stopIndex;
 
     // Determine which seats are occupied for this route segment
+    // Use min/max logic to handle both forward and return trips correctly
+    const minIndex = Math.min(fromStop.stopIndex, toStop.stopIndex);
+    const maxIndex = Math.max(fromStop.stopIndex, toStop.stopIndex);
+
+    console.log(
+      `🔍 Checking seat availability for route segment: stopIndex ${fromStop.stopIndex} → ${toStop.stopIndex} (${isReturnTrip ? 'RETURN' : 'FORWARD'} trip)`
+    );
+    console.log(`📊 Total bookings to check: ${trip.bookings.length}`);
+
     const occupiedSeatIds = new Set<string>();
     trip.bookings.forEach((booking) => {
-      const bookingFrom = booking.group.fromStop.stopIndex;
-      const bookingTo = booking.group.toStop.stopIndex;
+      const bookingFromIdx = booking.group.fromStop.stopIndex;
+      const bookingToIdx = booking.group.toStop.stopIndex;
+      
+      // Determine if the existing booking is a return trip (same logic as current request)
+      const bookingIsReturnTrip = bookingFromIdx > bookingToIdx;
+      
+      // ✅ CRITICAL FIX: Only consider bookings in the SAME DIRECTION
+      if (bookingIsReturnTrip !== isReturnTrip) {
+        console.log(
+          `✅ Seat ${booking.seat.seatNumber} is AVAILABLE (booking is ${bookingIsReturnTrip ? 'RETURN' : 'FORWARD'}, current trip is ${isReturnTrip ? 'RETURN' : 'FORWARD'})`
+        );
+        return; // Skip this booking - it's in the opposite direction
+      }
 
-      // Check if booking overlaps with requested segment
-      if (fromStop.stopIndex < bookingTo && toStop.stopIndex > bookingFrom) {
+      // For same direction trips, check if route segments overlap
+      // Forward trip: lower index → higher index
+      // Return trip: higher index → lower index
+      const bookingMin = Math.min(bookingFromIdx, bookingToIdx);
+      const bookingMax = Math.max(bookingFromIdx, bookingToIdx);
+
+      // Check if segments overlap
+      if (minIndex < bookingMax && maxIndex > bookingMin) {
+        console.log(
+          `❌ Seat ${booking.seat.seatNumber} is OCCUPIED (${bookingIsReturnTrip ? 'RETURN' : 'FORWARD'} trip: ${bookingFromIdx}→${bookingToIdx} overlaps with ${fromStop.stopIndex}→${toStop.stopIndex})`
+        );
         occupiedSeatIds.add(booking.seatId);
+      } else {
+        console.log(
+          `✅ Seat ${booking.seat.seatNumber} is AVAILABLE (${bookingIsReturnTrip ? 'RETURN' : 'FORWARD'} trip: ${bookingFromIdx}→${bookingToIdx} does NOT overlap with ${fromStop.stopIndex}→${toStop.stopIndex})`
+        );
       }
     });
+
+    console.log(`🔒 Total occupied seats in ${isReturnTrip ? 'RETURN' : 'FORWARD'} direction: ${occupiedSeatIds.size}`);
 
     // Organize seats by level and create layout
     const seats = trip.bus.seats.map((seat) => ({
@@ -1036,6 +1137,59 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
 
     const fare = toStop.priceFromOrigin - fromStop.priceFromOrigin;
 
+    const orderedStops = [...trip.bus.stops].sort(
+      (a, b) => a.stopIndex - b.stopIndex
+    );
+    const routeStops = (isReturnTrip
+      ? [...orderedStops].reverse()
+      : orderedStops
+    ).map((stop) => ({
+      id: stop.id,
+      name: stop.name,
+      city: stop.city,
+      state: stop.state,
+      stopIndex: stop.stopIndex,
+      arrivalTime: stop.arrivalTime,
+      departureTime: stop.departureTime,
+      returnArrivalTime: stop.returnArrivalTime,
+      returnDepartureTime: stop.returnDepartureTime,
+      boardingPoints: (stop.boardingPoints || []).map((point) => ({
+        id: point.id,
+        name: point.name,
+        time: point.time,
+        type: point.type,
+        landmark: point.landmark,
+        address: point.address,
+        pointOrder: point.pointOrder,
+      })),
+    }));
+
+    const mapPoint = (point: any) => ({
+      id: point.id,
+      name: point.name,
+      time: point.time,
+      type: point.type,
+      landmark: point.landmark,
+      address: point.address,
+      pointOrder: point.pointOrder,
+    });
+
+    const candidateBoardingPoints = (fromStop.boardingPoints || []).filter(
+      (point) => point.type === "BOARDING"
+    );
+    const availableBoardingPoints =
+      candidateBoardingPoints.length > 0
+        ? candidateBoardingPoints
+        : fromStop.boardingPoints || [];
+
+    const candidateDroppingPoints = (toStop.boardingPoints || []).filter(
+      (point) => point.type === "DROPPING"
+    );
+    const availableDroppingPoints =
+      candidateDroppingPoints.length > 0
+        ? candidateDroppingPoints
+        : toStop.boardingPoints || [];
+
     return res.status(200).json({
       message: "Bus info fetched successfully",
       trip: {
@@ -1052,7 +1206,7 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
         totalSeats: trip.bus.totalSeats,
         gridRows: trip.bus.gridRows,
         gridColumns: trip.bus.gridColumns,
-        images: trip.bus.images || [],
+        images: trip.bus.images,
       },
       route: {
         fromStop: {
@@ -1063,6 +1217,7 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
           lowerSeaterPrice: fromStop.lowerSeaterPrice,
           lowerSleeperPrice: fromStop.lowerSleeperPrice,
           upperSleeperPrice: fromStop.upperSleeperPrice,
+          boardingPoints: availableBoardingPoints.map(mapPoint),
         },
         toStop: {
           id: toStop.id,
@@ -1072,8 +1227,13 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
           lowerSeaterPrice: toStop.lowerSeaterPrice,
           lowerSleeperPrice: toStop.lowerSleeperPrice,
           upperSleeperPrice: toStop.upperSleeperPrice,
+          boardingPoints: (toStop.boardingPoints || []).map(mapPoint),
         },
         fare,
+        isReturnTrip,
+        path: routeStops,
+        boardingPoints: availableBoardingPoints.map(mapPoint),
+        droppingPoints: availableDroppingPoints.map(mapPoint),
       },
       seats: {
         lowerDeck: lowerDeckSeats,
@@ -1091,8 +1251,16 @@ userRouter.post(
   "/bookticket",
   authenticateUser,
   async (req: AuthRequest, res): Promise<any> => {
-    const { tripId, fromStopId, toStopId, seatIds, passengers, couponCode } =
-      req.body;
+    const {
+      tripId,
+      fromStopId,
+      toStopId,
+      seatIds,
+      passengers,
+      couponCode,
+      boardingPointId,
+      droppingPointId,
+    } = req.body;
     const userId = req.userId;
 
     if (!userId) {
@@ -1128,6 +1296,18 @@ userRouter.post(
     }
 
     try {
+      // Verify user exists before starting transaction
+      const userExists = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { id: true, email: true, name: true },
+      });
+
+      if (!userExists) {
+        return res.status(401).json({
+          errorMessage: "User account not found. Please sign in again.",
+        });
+      }
+
       // Start transaction
       const result = await prisma.$transaction(async (tx) => {
         // 1. Verify trip exists and is bookable
@@ -1206,6 +1386,26 @@ userRouter.post(
         // Allow both forward and return trips
         if (fromStop.stopIndex === toStop.stopIndex) {
           throw new Error("From and to stops cannot be the same");
+        }
+
+        const boardingPoint = await tx.stopPoint.findUnique({
+          where: { id: boardingPointId },
+        });
+
+        if (!boardingPoint || boardingPoint.stopId !== fromStopId) {
+          throw new Error("Invalid boarding point selected");
+        }
+
+        if (boardingPoint.type !== "BOARDING") {
+          throw new Error("Selected boarding point is not valid for boarding");
+        }
+
+        const droppingPoint = await tx.stopPoint.findUnique({
+          where: { id: droppingPointId },
+        });
+
+        if (!droppingPoint || droppingPoint.stopId !== toStopId) {
+          throw new Error("Invalid dropping point selected");
         }
 
         // 3. Verify all seats exist and belong to this bus
@@ -1288,29 +1488,26 @@ userRouter.post(
             // Check validity period
             if (now >= offer.validFrom && now <= offer.validUntil) {
               // Check usage limit
-              if (!offer.usageLimit || offer.usageCount < offer.usageLimit) {
+              if (hasRemainingUsage(offer)) {
                 // Check minimum booking amount
                 if (
                   !offer.minBookingAmount ||
                   totalPrice >= offer.minBookingAmount
                 ) {
                   // Check bus applicability
+                  const isAdminCoupon =
+                    offer.creatorRole === OfferCreatorRole.ADMIN;
+
                   if (
-                    offer.applicableBuses.length === 0 ||
-                    offer.applicableBuses.includes(trip.busId)
+                    (!isAdminCoupon || trip.bus.adminId === offer.createdBy) &&
+                    (offer.applicableBuses.length === 0 ||
+                      offer.applicableBuses.includes(trip.busId))
                   ) {
                     // Calculate discount
-                    if (offer.discountType === "PERCENTAGE") {
-                      discountAmount = (totalPrice * offer.discountValue) / 100;
-                      if (offer.maxDiscount) {
-                        discountAmount = Math.min(
-                          discountAmount,
-                          offer.maxDiscount
-                        );
-                      }
-                    } else {
-                      discountAmount = offer.discountValue;
-                    }
+                    discountAmount = calculateDiscountAmount(
+                      offer,
+                      totalPrice
+                    );
 
                     finalPrice = Math.max(0, totalPrice - discountAmount);
                     appliedOffer = offer;
@@ -1338,6 +1535,8 @@ userRouter.post(
             offerId: appliedOffer?.id || null,
             discountAmount,
             finalPrice,
+            boardingPointId: boardingPoint.id,
+            droppingPointId: droppingPoint.id,
             status: "CONFIRMED",
           },
         });
@@ -1382,6 +1581,8 @@ userRouter.post(
           seats,
           fromStop,
           toStop,
+          boardingPoint,
+          droppingPoint,
           totalPrice,
           discountAmount,
           finalPrice,
@@ -1443,6 +1644,22 @@ userRouter.post(
           from: result.fromStop.name,
           to: result.toStop.name,
         },
+        boardingPoint: result.boardingPoint
+          ? {
+              id: result.boardingPoint.id,
+              name: result.boardingPoint.name,
+              time: result.boardingPoint.time,
+              type: result.boardingPoint.type,
+            }
+          : null,
+        droppingPoint: result.droppingPoint
+          ? {
+              id: result.droppingPoint.id,
+              name: result.droppingPoint.name,
+              time: result.droppingPoint.time,
+              type: result.droppingPoint.type,
+            }
+          : null,
         passengers: result.passengers.map((p) => ({
           name: p.name,
           age: p.age,
@@ -1451,6 +1668,20 @@ userRouter.post(
       });
     } catch (e: any) {
       console.error("Error booking ticket:", e);
+      
+      // Handle specific Prisma errors
+      if (e.code === 'P2003') {
+        return res.status(401).json({
+          errorMessage: "User authentication error. Please sign out and sign in again.",
+        });
+      }
+      
+      if (e.code === 'P2025') {
+        return res.status(404).json({
+          errorMessage: "Trip or seat not found",
+        });
+      }
+      
       return res.status(500).json({
         errorMessage: e.message || "Failed to book ticket",
       });
@@ -1976,6 +2207,23 @@ userRouter.post(
     }
 
     try {
+      const trip = await prisma.trip.findUnique({
+        where: { id: tripId },
+        select: {
+          id: true,
+          busId: true,
+          bus: {
+            select: {
+              adminId: true,
+            },
+          },
+        },
+      });
+
+      if (!trip) {
+        return res.status(404).json({ errorMessage: "Trip not found" });
+      }
+
       // Find offer
       const offer = await prisma.offer.findUnique({
         where: { code: code.toUpperCase() },
@@ -2001,7 +2249,7 @@ userRouter.post(
       }
 
       // Check usage limit
-      if (offer.usageLimit && offer.usageCount >= offer.usageLimit) {
+      if (!hasRemainingUsage(offer)) {
         return res
           .status(400)
           .json({ errorMessage: "This coupon has reached its usage limit" });
@@ -2014,31 +2262,26 @@ userRouter.post(
         });
       }
 
-      // Check if applicable to this trip
-      if (offer.applicableBuses.length > 0) {
-        const trip = await prisma.trip.findUnique({
-          where: { id: tripId },
-          select: { busId: true },
-        });
-
-        if (!trip || !offer.applicableBuses.includes(trip.busId)) {
+      if (offer.creatorRole === OfferCreatorRole.ADMIN) {
+        if (!trip.bus?.adminId || trip.bus.adminId !== offer.createdBy) {
           return res.status(400).json({
             errorMessage: "This coupon is not applicable to this bus",
           });
         }
       }
 
-      // Calculate discount
-      let discountAmount = 0;
-      if (offer.discountType === "PERCENTAGE") {
-        discountAmount = (totalAmount * offer.discountValue) / 100;
-        if (offer.maxDiscount) {
-          discountAmount = Math.min(discountAmount, offer.maxDiscount);
-        }
-      } else {
-        discountAmount = offer.discountValue;
+      // Check if applicable to this trip
+      if (
+        offer.applicableBuses.length > 0 &&
+        !offer.applicableBuses.includes(trip.busId)
+      ) {
+        return res.status(400).json({
+          errorMessage: "This coupon is not applicable to this bus",
+        });
       }
 
+      // Calculate discount
+      const discountAmount = calculateDiscountAmount(offer, totalAmount);
       const finalAmount = Math.max(0, totalAmount - discountAmount);
 
       return res.status(200).json({
@@ -2047,6 +2290,7 @@ userRouter.post(
           id: offer.id,
           code: offer.code,
           description: offer.description,
+          creatorRole: offer.creatorRole,
         },
         originalAmount: totalAmount,
         discountAmount,
@@ -2055,6 +2299,129 @@ userRouter.post(
     } catch (error) {
       console.error("Error applying coupon:", error);
       return res.status(500).json({ errorMessage: "Failed to apply coupon" });
+    }
+  }
+);
+
+/**
+ * GET /user/trip/:tripId/coupons
+ * Fetch eligible coupons for a trip
+ */
+userRouter.get(
+  "/trip/:tripId/coupons",
+  authenticateUser,
+  async (req: AuthRequest, res): Promise<any> => {
+    const { tripId } = req.params;
+    const { totalAmount } = req.query;
+
+    if (!tripId) {
+      return res.status(400).json({ errorMessage: "Trip ID is required" });
+    }
+
+    const parsedTotalAmount =
+      totalAmount !== undefined ? Number(totalAmount) : null;
+
+    if (
+      parsedTotalAmount !== null &&
+      (Number.isNaN(parsedTotalAmount) || parsedTotalAmount < 0)
+    ) {
+      return res.status(400).json({
+        errorMessage: "totalAmount must be a positive number",
+      });
+    }
+
+    try {
+      const trip = await prisma.trip.findUnique({
+        where: { id: tripId },
+        select: {
+          id: true,
+          busId: true,
+          bus: {
+            select: {
+              adminId: true,
+              name: true,
+            },
+          },
+        },
+      });
+
+      if (!trip) {
+        return res.status(404).json({ errorMessage: "Trip not found" });
+      }
+
+      const now = new Date();
+
+      const offers = await prisma.offer.findMany({
+        where: {
+          isActive: true,
+          validFrom: { lte: now },
+          validUntil: { gte: now },
+          OR: [
+            { creatorRole: OfferCreatorRole.SUPERADMIN },
+            {
+              creatorRole: OfferCreatorRole.ADMIN,
+              createdBy: trip.bus?.adminId || "",
+              applicableBuses: { has: trip.busId },
+            },
+          ],
+        },
+        include: {
+          _count: {
+            select: {
+              bookingGroups: true,
+            },
+          },
+        },
+        orderBy: [
+          { creatorRole: "desc" },
+          { validUntil: "asc" },
+        ],
+      });
+
+      const coupons = offers
+        .filter((offer) => hasRemainingUsage(offer))
+        .map((offer) => {
+          const meetsMinAmount =
+            parsedTotalAmount !== null
+              ? parsedTotalAmount >= (offer.minBookingAmount || 0)
+              : true;
+
+          const potentialDiscount =
+            parsedTotalAmount !== null && meetsMinAmount
+              ? calculateDiscountAmount(offer, parsedTotalAmount)
+              : null;
+
+          return {
+            id: offer.id,
+            code: offer.code,
+            description: offer.description,
+            discountType: offer.discountType,
+            discountValue: offer.discountValue,
+            maxDiscount: offer.maxDiscount,
+            minBookingAmount: offer.minBookingAmount,
+            usageLimit: offer.usageLimit,
+            usageCount: offer.usageCount,
+            remainingUsage: offer.usageLimit
+              ? Math.max(offer.usageLimit - offer.usageCount, 0)
+              : null,
+            validFrom: offer.validFrom,
+            validUntil: offer.validUntil,
+            applicableBuses: offer.applicableBuses,
+            creatorRole: offer.creatorRole,
+            createdBy: offer.createdBy,
+            meetsMinAmount,
+            potentialDiscount,
+          };
+        });
+
+      return res.status(200).json({
+        message: "Eligible coupons fetched successfully",
+        coupons,
+        count: coupons.length,
+      });
+    } catch (error) {
+      console.error("Error fetching coupons:", error);
+      return res.status(500).json({ errorMessage: "Failed to fetch coupons" });
     }
   }
 );
@@ -2173,7 +2540,10 @@ userRouter.get("/offers", async (req, res): Promise<any> => {
         validFrom: { lte: now },
         validUntil: { gte: now },
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: [
+        { creatorRole: "desc" },
+        { createdAt: "desc" },
+      ],
       take: 10,
     });
 

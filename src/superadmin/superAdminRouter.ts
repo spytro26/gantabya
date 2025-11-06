@@ -4,6 +4,12 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcrypt";
 import cookieParser from "cookie-parser";
 import "dotenv/config";
+import {
+  createOffer,
+  handleOfferError,
+  mapOfferWithUsage,
+} from "../services/offerService.js";
+import { DiscountType, OfferCreatorRole } from "@prisma/client";
 
 const JWT_SECRET =
   process.env.superAdminSecret || "super-secret-key-change-in-production";
@@ -47,6 +53,15 @@ const authenticateSuperAdmin = async (
   } catch (e) {
     return res.status(401).json({ errorMessage: "Invalid or expired token" });
   }
+};
+
+const parseOptionalNumber = (value: unknown): number | null => {
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return parsed;
 };
 
 // Super Admin Signin endpoint
@@ -298,6 +313,234 @@ superAdminRouter.post(
       return res.status(500).json({
         errorMessage: "An error occurred while revoking admin",
       });
+    }
+  }
+);
+
+/**
+ * POST /superadmin/offers
+ * Create a global offer that applies to all buses
+ */
+superAdminRouter.post(
+  "/offers",
+  authenticateSuperAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    const superAdminId = req.superAdminId;
+    const {
+      code,
+      description,
+      discountType,
+      discountValue,
+      maxDiscount,
+      validFrom,
+      validUntil,
+      minBookingAmount,
+      usageLimit,
+    } = req.body;
+
+    if (!superAdminId) {
+      return res.status(401).json({ errorMessage: "Super admin not authenticated" });
+    }
+
+    try {
+      const offer = await createOffer(
+        {
+          code,
+          description,
+          discountType: discountType as DiscountType,
+          discountValue: Number(discountValue),
+          maxDiscount: parseOptionalNumber(maxDiscount),
+          validFrom,
+          validUntil,
+          minBookingAmount: parseOptionalNumber(minBookingAmount),
+          usageLimit: parseOptionalNumber(usageLimit),
+        },
+        {
+          id: superAdminId,
+          role: OfferCreatorRole.SUPERADMIN,
+        }
+      );
+
+      return res.status(201).json({
+        message: "Offer created successfully",
+        offer,
+      });
+    } catch (error) {
+      return handleOfferError(error, res);
+    }
+  }
+);
+
+/**
+ * GET /superadmin/offers
+ * List offers with optional filters
+ */
+superAdminRouter.get(
+  "/offers",
+  authenticateSuperAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    const { active, expired, search } = req.query;
+
+    try {
+      const now = new Date();
+
+      const offers = await prisma.offer.findMany({
+        where: {
+          ...(active === "true" && {
+            isActive: true,
+            validUntil: { gte: now },
+          }),
+          ...(expired === "true" && {
+            validUntil: { lt: now },
+          }),
+          ...(search && {
+            OR: [
+              { code: { contains: String(search), mode: "insensitive" } },
+              {
+                description: {
+                  contains: String(search),
+                  mode: "insensitive",
+                },
+              },
+            ],
+          }),
+        },
+        include: {
+          _count: {
+            select: {
+              bookingGroups: true,
+            },
+          },
+        },
+        orderBy: [
+          { creatorRole: "desc" },
+          { createdAt: "desc" },
+        ],
+      });
+
+      const offersWithUsage = offers.map(mapOfferWithUsage);
+
+      return res.status(200).json({
+        message: "Offers fetched successfully",
+        offers: offersWithUsage,
+        count: offers.length,
+      });
+    } catch (error) {
+      console.error("Error fetching offers:", error);
+      return res.status(500).json({ errorMessage: "Failed to fetch offers" });
+    }
+  }
+);
+
+/**
+ * PATCH /superadmin/offers/:offerId
+ * Toggle offer activation status
+ */
+superAdminRouter.patch(
+  "/offers/:offerId",
+  authenticateSuperAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    const { offerId } = req.params;
+    const { isActive } = req.body;
+    const superAdminId = req.superAdminId;
+
+    if (!offerId) {
+      return res.status(400).json({ errorMessage: "Offer ID is required" });
+    }
+
+    if (typeof isActive !== "boolean") {
+      return res.status(400).json({
+        errorMessage: "isActive flag must be provided as true or false",
+      });
+    }
+
+    if (!superAdminId) {
+      return res.status(401).json({ errorMessage: "Not authenticated" });
+    }
+
+    try {
+      const offer = await prisma.offer.findUnique({
+        where: { id: offerId },
+      });
+
+      if (!offer) {
+        return res.status(404).json({ errorMessage: "Offer not found" });
+      }
+
+      if (
+        offer.creatorRole !== OfferCreatorRole.SUPERADMIN ||
+        offer.createdBy !== superAdminId
+      ) {
+        return res.status(403).json({
+          errorMessage: "You can only update offers created by you",
+        });
+      }
+
+      const updated = await prisma.offer.update({
+        where: { id: offerId },
+        data: { isActive },
+      });
+
+      return res.status(200).json({
+        message: "Offer updated successfully",
+        offer: updated,
+      });
+    } catch (error) {
+      console.error("Error updating offer:", error);
+      return res.status(500).json({ errorMessage: "Failed to update offer" });
+    }
+  }
+);
+
+/**
+ * DELETE /superadmin/offers/:offerId
+ * Deactivate a super admin offer
+ */
+superAdminRouter.delete(
+  "/offers/:offerId",
+  authenticateSuperAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    const { offerId } = req.params;
+    const superAdminId = req.superAdminId;
+
+    if (!offerId) {
+      return res.status(400).json({ errorMessage: "Offer ID is required" });
+    }
+
+    if (!superAdminId) {
+      return res.status(401).json({ errorMessage: "Not authenticated" });
+    }
+
+    try {
+      const offer = await prisma.offer.findUnique({
+        where: { id: offerId },
+      });
+
+      if (!offer) {
+        return res.status(404).json({ errorMessage: "Offer not found" });
+      }
+
+      if (
+        offer.creatorRole !== OfferCreatorRole.SUPERADMIN ||
+        offer.createdBy !== superAdminId
+      ) {
+        return res.status(403).json({
+          errorMessage: "You can only update offers created by you",
+        });
+      }
+
+      const updated = await prisma.offer.update({
+        where: { id: offerId },
+        data: { isActive: false },
+      });
+
+      return res.status(200).json({
+        message: "Offer deactivated successfully",
+        offer: updated,
+      });
+    } catch (error) {
+      console.error("Error deactivating offer:", error);
+      return res.status(500).json({ errorMessage: "Failed to deactivate offer" });
     }
   }
 );

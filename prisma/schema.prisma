@@ -15,6 +15,7 @@ model User {
   password String
   verified Boolean @default(false) // Email verification for users, admin approval for admins
   phone    String? // Added for notifications
+  busServiceName String @default("Ankush Travels") // Display name for admin's bus service
 
   role                Role           @default(USER)
   adminVerified       Boolean        @default(false) // Only for ADMIN role - verified by super admin
@@ -123,11 +124,35 @@ model Stop {
   // Relations
   groupsFrom BookingGroup[] @relation("GroupFromStop")
   groupsTo   BookingGroup[] @relation("GroupToStop")
+  boardingPoints StopPoint[]
 
   @@unique([busId, stopIndex])
   @@index([busId, stopIndex])
   @@index([city])
   @@index([name])
+}
+
+enum StopPointType {
+  BOARDING
+  DROPPING
+}
+
+model StopPoint {
+  id         String        @id @default(uuid())
+  stopId     String
+  stop       Stop          @relation(fields: [stopId], references: [id], onDelete: Cascade)
+  type       StopPointType @default(BOARDING)
+  name       String
+  landmark   String?
+  address    String?
+  time       String
+  pointOrder Int           @default(0)
+  createdAt  DateTime      @default(now())
+
+  boardingGroups BookingGroup[] @relation("GroupBoardingPoint")
+  droppingGroups BookingGroup[] @relation("GroupDroppingPoint")
+
+  @@index([stopId, type, pointOrder])
 }
 
 // ==================== SEAT MODEL ====================
@@ -209,6 +234,10 @@ model BookingGroup {
   offer          Offer?  @relation(fields: [offerId], references: [id])
   discountAmount Float   @default(0)
   finalPrice     Float? // totalPrice - discountAmount
+  boardingPointId String?
+  boardingPoint   StopPoint? @relation("GroupBoardingPoint", fields: [boardingPointId], references: [id], onDelete: SetNull)
+  droppingPointId String?
+  droppingPoint   StopPoint? @relation("GroupDroppingPoint", fields: [droppingPointId], references: [id], onDelete: SetNull)
 
   bookings  Booking[]
   createdAt DateTime  @default(now())
@@ -305,7 +334,8 @@ model Offer {
   usageCount       Int            @default(0)
   isActive         Boolean        @default(true)
   applicableBuses  String[] // Array of bus IDs, empty = all buses
-  createdBy        String // Admin ID
+  createdBy        String // Admin or super admin ID
+  creatorRole      OfferCreatorRole @default(ADMIN)
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
   bookingGroups    BookingGroup[]
@@ -317,6 +347,11 @@ model Offer {
 enum DiscountType {
   PERCENTAGE
   FIXED_AMOUNT
+}
+
+enum OfferCreatorRole {
+  ADMIN
+  SUPERADMIN
 }
 
 // ==================== NOTIFICATION MODEL ====================

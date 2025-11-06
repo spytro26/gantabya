@@ -34,6 +34,19 @@ export const authenticateUser = async (
 
   try {
     const decoded = jwt.verify(token, USER_JWT_SECRET) as string;
+    
+    // Verify the user actually exists in the database
+    const user = await prisma.user.findUnique({
+      where: { id: decoded },
+      select: { id: true, role: true },
+    });
+
+    if (!user) {
+      return res.status(401).json({ 
+        errorMessage: "User account not found. Please sign in again." 
+      });
+    }
+
     req.userId = decoded;
     next();
   } catch (e) {
