@@ -1588,6 +1588,9 @@ userRouter.post(
           finalPrice,
           appliedOffer,
         };
+      }, {
+        maxWait: 15000, // Wait up to 15 seconds for transaction slot
+        timeout: 30000, // Allow up to 30 seconds for booking transaction
       });
 
       // Get user details for notification

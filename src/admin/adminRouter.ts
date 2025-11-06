@@ -779,11 +779,28 @@ adminRouter.post(
 
       const allSeats = [...lowerSeats, ...upperSeats];
 
+      // ✅ Check if there are any confirmed bookings for this bus before allowing layout changes
+      const existingBookings = await prisma.booking.count({
+        where: {
+          seat: {
+            busId: busId,
+          },
+          status: "CONFIRMED",
+        },
+      });
+
+      if (existingBookings > 0) {
+        return res.status(400).json({
+          errorMessage: `Cannot modify seat layout. This bus has ${existingBookings} active booking(s). Please cancel all bookings first or create a new bus with the desired layout.`,
+          activeBookings: existingBookings,
+        });
+      }
+
       // Use transaction to delete old seats and create new ones
       // Increased timeout to 15 seconds for large layouts (15×4 = 60 seats)
       const result = await prisma.$transaction(
         async (tx) => {
-          // Delete existing seats for this bus
+          // Delete existing seats for this bus (safe now - no bookings exist)
           await tx.seat.deleteMany({
             where: { busId },
           });
@@ -828,6 +845,15 @@ adminRouter.post(
       });
     } catch (e: any) {
       console.error("Error saving seat layout:", e);
+      
+      // Handle foreign key constraint error
+      if (e.code === 'P2003') {
+        return res.status(400).json({
+          errorMessage: "Cannot modify seat layout because some seats have active bookings. Please ensure all bookings are cancelled first.",
+          details: e.message,
+        });
+      }
+      
       return res.status(500).json({
         errorMessage: "Failed to save seat layout",
         details: e.message,
