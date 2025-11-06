@@ -1491,11 +1491,54 @@ userRouter.post(
             );
           }
 
-          // 5. Calculate total price
-          const farePerSeat = Math.abs(
-            toStop.priceFromOrigin - fromStop.priceFromOrigin
-          );
-          const totalPrice = farePerSeat * seatIds.length;
+          // 5. Calculate total price using seat-specific cumulative pricing
+          const getCumulativePriceForSeat = (stop: any, seat: any) => {
+            if (!stop) {
+              return 0;
+            }
+
+            const level = (seat.level || "").toUpperCase();
+            const type = (seat.type || "").toUpperCase();
+
+            if (level === "LOWER" && type === "SEATER") {
+              return stop.lowerSeaterPrice ?? stop.priceFromOrigin ?? 0;
+            }
+
+            if (level === "LOWER" && type === "SLEEPER") {
+              return stop.lowerSleeperPrice ?? stop.priceFromOrigin ?? 0;
+            }
+
+            if (level === "UPPER" && type === "SLEEPER") {
+              return stop.upperSleeperPrice ?? stop.priceFromOrigin ?? 0;
+            }
+
+            if (level === "UPPER" && type === "SEATER") {
+              // Fallback for potential future seat types
+              return stop.upperSeaterPrice ?? stop.priceFromOrigin ?? 0;
+            }
+
+            return stop.priceFromOrigin ?? 0;
+          };
+
+          const getSeatFare = (seat: any) => {
+            const fromPrice = getCumulativePriceForSeat(fromStop, seat);
+            const toPrice = getCumulativePriceForSeat(toStop, seat);
+            const seatSpecificFare = Math.abs(toPrice - fromPrice);
+
+            if (Number.isFinite(seatSpecificFare) && seatSpecificFare > 0) {
+              return seatSpecificFare;
+            }
+
+            const fallbackFare = Math.abs(
+              (toStop.priceFromOrigin ?? 0) - (fromStop.priceFromOrigin ?? 0)
+            );
+
+            return Number.isFinite(fallbackFare) ? fallbackFare : 0;
+          };
+
+          const totalPrice = seats.reduce((sum, seat) => {
+            return sum + getSeatFare(seat);
+          }, 0);
 
           // 6. Apply coupon if provided
           let appliedOffer = null;
