@@ -1,0 +1,8 @@
+userSecret = "your user secret "
+adminSecret = "admin-secret"
+appPassword="your-gmail-appPassword"
+gmail="your-gmail"
+DATABASE_URL="your-db-url"
+CLOUDINARY_CLOUD_NAME=""
+CLOUDINARY_API_KEY=""
+CLOUDINARY_API_SECRET=""

@@ -648,8 +648,29 @@ superAdminRouter.get(
           busNumber: true,
           name: true,
           type: true,
+          layoutType: true,
           totalSeats: true,
           createdAt: true,
+          stops: {
+            orderBy: { stopIndex: "asc" },
+            select: {
+              id: true,
+              name: true,
+              city: true,
+              stopIndex: true,
+              lowerSeaterPrice: true,
+              lowerSleeperPrice: true,
+              upperSleeperPrice: true,
+            },
+          },
+          images: {
+            select: {
+              id: true,
+              imageUrl: true,
+              createdAt: true,
+            },
+            orderBy: { createdAt: "asc" },
+          },
           _count: {
             select: {
               trips: true,

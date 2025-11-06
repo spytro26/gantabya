@@ -8,22 +8,22 @@ async function main() {
 
   // Create default super admin
   const superAdminExists = await prisma.superAdmin.findUnique({
-    where: { username: "super" },
+    where: { username: "$Admin82SecureGantabya" },
   });
 
   if (!superAdminExists) {
-    const hashedPassword = await bcrypt.hash("admin", 10);
+    const hashedPassword = await bcrypt.hash("$SecureGantabya247", 10);
 
     const superAdmin = await prisma.superAdmin.create({
       data: {
-        username: "super",
+        username: "$Admin82SecureGantabya",
         password: hashedPassword,
       },
     });
 
     console.log("✅ Super Admin created:");
-    console.log("   Username: super");
-    console.log("   Password: admin");
+    console.log("   Username: $Admin82SecureGantabya");
+    console.log("   Password: $SecureGantabya247");
     console.log("   ID:", superAdmin.id);
   } else {
     console.log("ℹ️  Super Admin already exists");
