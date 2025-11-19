@@ -35,6 +35,22 @@ export const bookTicketSchema = z.object({
   couponCode: z.string().optional(), // Optional coupon code
 });
 
+export const initiatePaymentSchema = bookTicketSchema.extend({
+  paymentMethod: z.enum(["RAZORPAY", "ESEWA"]),
+});
+
+export const verifyPaymentSchema = z.object({
+  paymentId: z.string().uuid("Invalid payment ID"),
+  razorpayOrderId: z.string().optional(),
+  razorpayPaymentId: z.string().optional(),
+  razorpaySignature: z.string().optional(),
+  esewaRefId: z.string().optional(),
+});
+
+export const confirmBookingSchema = z.object({
+  paymentId: z.string().uuid("Invalid payment ID"),
+});
+
 export const applyCouponSchema = z.object({
   code: z.string().min(1, "Coupon code is required"),
   tripId: z.string().uuid("Invalid trip ID"),

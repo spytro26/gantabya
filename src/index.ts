@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import jwt from "jsonwebtoken";
@@ -8,6 +9,7 @@ import { superAdminRouter } from "./superadmin/superAdminRouter.js";
 import type { Response, Request } from "express";
 import { PrismaClient } from "@prisma/client";
 export const prisma = new PrismaClient();
+export type PrismaClientType = typeof prisma;
 
 const app = express();
 app.use(express.json());

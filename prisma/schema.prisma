@@ -23,6 +23,7 @@ model User {
   groups              BookingGroup[]
   ownedBuses          Bus[] // For admin's buses
   notifications       Notification[]
+  payments            Payment[]
   createdAt           DateTime       @default(now())
 }
 
@@ -240,6 +241,7 @@ model BookingGroup {
   droppingPoint   StopPoint? @relation("GroupDroppingPoint", fields: [droppingPointId], references: [id], onDelete: SetNull)
 
   bookings  Booking[]
+  payment   Payment?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
@@ -279,6 +281,23 @@ model Booking {
 enum BookingStatus {
   CONFIRMED
   CANCELLED
+}
+
+enum PaymentMethod {
+  RAZORPAY
+  ESEWA
+}
+
+enum PaymentStatus {
+  INITIATED
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum CurrencyCode {
+  NPR
+  INR
 }
 
 // ==================== PASSENGER MODEL ====================
@@ -405,4 +424,28 @@ model BusImage {
   createdAt  DateTime @default(now())
 
   @@index([busId])
+}
+
+model Payment {
+  id               String        @id @default(uuid())
+  bookingGroupId   String?       @unique
+  bookingGroup     BookingGroup? @relation(fields: [bookingGroupId], references: [id], onDelete: Cascade)
+  method           PaymentMethod
+  userId           String
+  user             User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  baseAmount       Float
+  baseCurrency     CurrencyCode  @default(NPR)
+  chargedAmount    Float
+  chargedCurrency  CurrencyCode
+  exchangeRate     Float?
+  gatewayOrderId   String?
+  gatewayPaymentId String?
+  gatewaySignature String?
+  metadata         Json?
+  status           PaymentStatus @default(INITIATED)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  @@index([userId])
+  @@index([method, status])
 }

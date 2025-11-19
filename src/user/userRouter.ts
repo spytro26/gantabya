@@ -26,8 +26,28 @@ import {
 import {
   applyCouponSchema,
   enhancedSearchSchema,
+  initiatePaymentSchema,
+  verifyPaymentSchema,
+  confirmBookingSchema,
 } from "../schemas/busSearchSchema.js";
-import { DiscountType, OfferCreatorRole } from "@prisma/client";
+import type { Offer } from "@prisma/client";
+import {
+  CurrencyCode,
+  DiscountType,
+  OfferCreatorRole,
+  PaymentMethod,
+  PaymentStatus,
+  Prisma,
+  PrismaClient,
+} from "@prisma/client";
+import Razorpay from "razorpay";
+import crypto from "crypto";
+import axios from "axios";
+import { getPaymentConfig } from "../config/paymentConfig.js";
+import {
+  calculatePaymentAmounts,
+  convertToMinorUnits,
+} from "../services/payment/currencyService.js";
 
 const JWT_SECRET = process.env.userSecret;
 const app = express();
@@ -91,6 +111,321 @@ const hasRemainingUsage = (offer: {
   }
 
   return offer.usageCount < offer.usageLimit;
+};
+
+type PrismaClientOrTransaction = PrismaClient | Prisma.TransactionClient;
+type BookingRequestInput = z.infer<typeof bookTicketSchema>;
+
+interface BookingPreparationResult {
+  trip: any;
+  fromStop: any;
+  toStop: any;
+  seats: any[];
+  boardingPoint: any;
+  droppingPoint: any;
+  passengers: BookingRequestInput["passengers"];
+  totalPrice: number;
+  discountAmount: number;
+  finalPrice: number;
+  appliedOffer: Offer | null;
+  offerDiscountReason?: string;
+  bookingPayload: BookingRequestInput;
+  isReturnTrip: boolean;
+  seatFares: Record<string, number>;
+}
+
+const roundToTwo = (value: number) =>
+  Math.round((value + Number.EPSILON) * 100) / 100;
+
+const appendQueryParams = (
+  baseUrl: string,
+  params: Record<string, string | number>
+) => {
+  const serialized = new URLSearchParams(
+    Object.entries(params).reduce<Record<string, string>>(
+      (acc, [key, value]) => {
+        acc[key] = String(value);
+        return acc;
+      },
+      {}
+    )
+  ).toString();
+
+  if (!baseUrl) {
+    return `?${serialized}`;
+  }
+
+  return baseUrl.includes("?")
+    ? `${baseUrl}&${serialized}`
+    : `${baseUrl}?${serialized}`;
+};
+
+const prepareBookingDetails = async (
+  client: PrismaClientOrTransaction,
+  payload: BookingRequestInput,
+  userId: string
+): Promise<BookingPreparationResult> => {
+  const {
+    tripId,
+    fromStopId,
+    toStopId,
+    seatIds,
+    passengers,
+    couponCode,
+    boardingPointId,
+    droppingPointId,
+  } = payload;
+
+  const trip = await client.trip.findUnique({
+    where: { id: tripId },
+    include: {
+      bus: {
+        include: {
+          stops: {
+            include: {
+              boardingPoints: true,
+            },
+          },
+          seats: {
+            where: { isActive: true },
+          },
+        },
+      },
+    },
+  });
+
+  if (!trip) {
+    throw new Error("Trip not found");
+  }
+
+  if (trip.status === "CANCELLED" || trip.status === "COMPLETED") {
+    throw new Error("Trip is not available for booking");
+  }
+
+  const now = new Date();
+  const tripDate = new Date(trip.tripDate);
+  tripDate.setHours(0, 0, 0, 0);
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  if (tripDate < today) {
+    throw new Error("Cannot book tickets for past dates");
+  }
+
+  const fromStop = trip.bus.stops.find((s) => s.id === fromStopId);
+  const toStop = trip.bus.stops.find((s) => s.id === toStopId);
+
+  if (!fromStop || !toStop) {
+    throw new Error("Stops not found");
+  }
+
+  if (fromStop.stopIndex === toStop.stopIndex) {
+    throw new Error("From and to stops cannot be the same");
+  }
+
+  const isReturnTrip = fromStop.stopIndex > toStop.stopIndex;
+
+  if (tripDate.getTime() === today.getTime()) {
+    const departureTime = isReturnTrip
+      ? fromStop.returnDepartureTime || fromStop.departureTime
+      : fromStop.departureTime;
+
+    if (departureTime) {
+      const [hours, minutes] = departureTime.split(":").map(Number);
+      if (hours !== undefined && minutes !== undefined) {
+        const departureDateTime = new Date(tripDate);
+        departureDateTime.setHours(hours, minutes, 0, 0);
+
+        if (departureDateTime <= now) {
+          throw new Error(
+            "Cannot book tickets for buses that have already departed"
+          );
+        }
+      }
+    }
+  }
+
+  const boardingPoint = await client.stopPoint.findUnique({
+    where: { id: boardingPointId },
+  });
+
+  if (!boardingPoint || boardingPoint.stopId !== fromStopId) {
+    throw new Error("Invalid boarding point selected");
+  }
+
+  if (boardingPoint.type !== "BOARDING") {
+    throw new Error("Selected boarding point is not valid for boarding");
+  }
+
+  const droppingPoint = await client.stopPoint.findUnique({
+    where: { id: droppingPointId },
+  });
+
+  if (!droppingPoint || droppingPoint.stopId !== toStopId) {
+    throw new Error("Invalid dropping point selected");
+  }
+
+  const seats = await client.seat.findMany({
+    where: {
+      id: { in: seatIds },
+      busId: trip.busId,
+      isActive: true,
+    },
+  });
+
+  if (seats.length !== seatIds.length) {
+    throw new Error("One or more seats are invalid or inactive");
+  }
+
+  const existingBookings = await client.booking.findMany({
+    where: {
+      tripId,
+      seatId: { in: seatIds },
+      status: "CONFIRMED",
+    },
+    include: {
+      group: {
+        select: {
+          fromStop: { select: { stopIndex: true } },
+          toStop: { select: { stopIndex: true } },
+        },
+      },
+    },
+  });
+
+  const minIndex = Math.min(fromStop.stopIndex, toStop.stopIndex);
+  const maxIndex = Math.max(fromStop.stopIndex, toStop.stopIndex);
+
+  const conflictingBookings = existingBookings.filter((booking) => {
+    const bookingFromIdx = booking.group.fromStop.stopIndex;
+    const bookingToIdx = booking.group.toStop.stopIndex;
+    const bookingMin = Math.min(bookingFromIdx, bookingToIdx);
+    const bookingMax = Math.max(bookingFromIdx, bookingToIdx);
+
+    return minIndex < bookingMax && maxIndex > bookingMin;
+  });
+
+  if (conflictingBookings.length > 0) {
+    const conflictedSeats = conflictingBookings
+      .map((b) => {
+        const seat = seats.find((s) => s.id === b.seatId);
+        return seat?.seatNumber || b.seatId;
+      })
+      .join(", ");
+
+    throw new Error(
+      `Seat(s) ${conflictedSeats} are already booked for this route segment. Please select different seats.`
+    );
+  }
+
+  const getCumulativePriceForSeat = (stop: any, seat: any) => {
+    if (!stop) {
+      return 0;
+    }
+
+    const level = (seat.level || "").toUpperCase();
+    const type = (seat.type || "").toUpperCase();
+
+    if (level === "LOWER" && type === "SEATER") {
+      return stop.lowerSeaterPrice ?? stop.priceFromOrigin ?? 0;
+    }
+
+    if (level === "LOWER" && type === "SLEEPER") {
+      return stop.lowerSleeperPrice ?? stop.priceFromOrigin ?? 0;
+    }
+
+    if (level === "UPPER" && type === "SLEEPER") {
+      return stop.upperSleeperPrice ?? stop.priceFromOrigin ?? 0;
+    }
+
+    if (level === "UPPER" && type === "SEATER") {
+      return stop.upperSeaterPrice ?? stop.priceFromOrigin ?? 0;
+    }
+
+    return stop.priceFromOrigin ?? 0;
+  };
+
+  const seatFares: Record<string, number> = {};
+  const totalPrice = seats.reduce((sum, seat) => {
+    const fromPrice = getCumulativePriceForSeat(fromStop, seat);
+    const toPrice = getCumulativePriceForSeat(toStop, seat);
+    const seatSpecificFare = Math.abs(toPrice - fromPrice);
+
+    const fare =
+      Number.isFinite(seatSpecificFare) && seatSpecificFare > 0
+        ? seatSpecificFare
+        : Math.abs(
+            (toStop.priceFromOrigin ?? 0) - (fromStop.priceFromOrigin ?? 0)
+          );
+
+    const normalizedFare = Number.isFinite(fare) ? fare : 0;
+    seatFares[seat.id] = normalizedFare;
+    return sum + normalizedFare;
+  }, 0);
+
+  let appliedOffer: Offer | null = null;
+  let discountAmount = 0;
+  let offerDiscountReason: string | undefined;
+
+  if (couponCode) {
+    const offer = await client.offer.findUnique({
+      where: { code: couponCode.toUpperCase() },
+    });
+
+    if (offer && offer.isActive) {
+      const nowDate = new Date();
+
+      if (nowDate >= offer.validFrom && nowDate <= offer.validUntil) {
+        if (hasRemainingUsage(offer)) {
+          if (!offer.minBookingAmount || totalPrice >= offer.minBookingAmount) {
+            const isAdminCoupon = offer.creatorRole === OfferCreatorRole.ADMIN;
+
+            if (
+              (!isAdminCoupon || trip.bus.adminId === offer.createdBy) &&
+              (offer.applicableBuses.length === 0 ||
+                offer.applicableBuses.includes(trip.busId))
+            ) {
+              discountAmount = calculateDiscountAmount(offer, totalPrice);
+              appliedOffer = offer;
+            } else {
+              offerDiscountReason =
+                "Coupon is not applicable to this bus or operator.";
+            }
+          } else {
+            offerDiscountReason =
+              "Booking amount does not meet minimum requirement.";
+          }
+        } else {
+          offerDiscountReason = "Coupon usage limit reached.";
+        }
+      } else {
+        offerDiscountReason = "Coupon is not currently valid.";
+      }
+    } else if (!offer) {
+      offerDiscountReason = "Coupon not found or inactive.";
+    }
+  }
+
+  const finalPrice = Math.max(0, roundToTwo(totalPrice - discountAmount));
+
+  return {
+    trip,
+    fromStop,
+    toStop,
+    seats,
+    boardingPoint,
+    droppingPoint,
+    passengers,
+    totalPrice: roundToTwo(totalPrice),
+    discountAmount: roundToTwo(discountAmount),
+    finalPrice,
+    appliedOffer,
+    ...(offerDiscountReason ? { offerDiscountReason } : {}),
+    bookingPayload: payload,
+    isReturnTrip,
+    seatFares,
+  };
 };
 userRouter.get("/", async (req, res) => {
   return res.status(402).json({ message: "welcome to the user router" });
@@ -1266,58 +1601,30 @@ userRouter.get("/showbusinfo/:tripId", async (req, res): Promise<any> => {
 });
 
 userRouter.post(
-  "/bookticket",
+  "/payments/initiate",
   authenticateUser,
   async (req: AuthRequest, res): Promise<any> => {
-    const {
-      tripId,
-      fromStopId,
-      toStopId,
-      seatIds,
-      passengers,
-      couponCode,
-      boardingPointId,
-      droppingPointId,
-    } = req.body;
     const userId = req.userId;
 
     if (!userId) {
       return res.status(401).json({ errorMessage: "User not authenticated" });
     }
 
-    // Validate input
-    const validation = bookTicketSchema.safeParse(req.body);
+    const validation = initiatePaymentSchema.safeParse(req.body);
     if (!validation.success) {
       return res.status(400).json({
-        errorMessage: "Invalid booking data",
+        errorMessage: "Invalid payment initiation data",
         errors: validation.error.issues,
       });
     }
 
-    // Validate passengers array matches seatIds
-    if (passengers.length !== seatIds.length) {
-      return res.status(400).json({
-        errorMessage: "Number of passengers must match number of seats",
-      });
-    }
-
-    // Validate each passenger has a seatId that exists in seatIds
-    const passengerSeatIds = passengers.map((p: any) => p.seatId);
-    const allSeatsHavePassengers = seatIds.every((seatId: string) =>
-      passengerSeatIds.includes(seatId)
-    );
-
-    if (!allSeatsHavePassengers) {
-      return res.status(400).json({
-        errorMessage: "Each seat must have corresponding passenger details",
-      });
-    }
+    const payload = validation.data;
+    const method = payload.paymentMethod as PaymentMethod;
 
     try {
-      // Verify user exists before starting transaction
       const userExists = await prisma.user.findUnique({
         where: { id: userId },
-        select: { id: true, email: true, name: true },
+        select: { id: true, email: true },
       });
 
       if (!userExists) {
@@ -1326,10 +1633,459 @@ userRouter.post(
         });
       }
 
-      // Start transaction
+      const bookingDetails = await prepareBookingDetails(
+        prisma,
+        {
+          tripId: payload.tripId,
+          fromStopId: payload.fromStopId,
+          toStopId: payload.toStopId,
+          seatIds: payload.seatIds,
+          passengers: payload.passengers,
+          couponCode: payload.couponCode,
+          boardingPointId: payload.boardingPointId,
+          droppingPointId: payload.droppingPointId,
+        },
+        userId
+      );
+
+      const config = getPaymentConfig();
+      const amounts = calculatePaymentAmounts(
+        method,
+        bookingDetails.finalPrice
+      );
+
+      let gatewayOrderId: string | undefined;
+      let gatewayMeta: any = {};
+
+      const bookingMetadata = {
+        ...bookingDetails.bookingPayload,
+        seatFares: bookingDetails.seatFares,
+        totalPrice: bookingDetails.totalPrice,
+        discountAmount: bookingDetails.discountAmount,
+        finalPrice: bookingDetails.finalPrice,
+        offerId: bookingDetails.appliedOffer?.id ?? null,
+        offerDiscountReason: bookingDetails.offerDiscountReason || null,
+      };
+
+      if (method === PaymentMethod.RAZORPAY) {
+        const razorpay = new Razorpay({
+          key_id: config.razorpay.keyId,
+          key_secret: config.razorpay.keySecret,
+        });
+
+        const order = await razorpay.orders.create({
+          amount: convertToMinorUnits(
+            amounts.chargedAmount,
+            amounts.chargedCurrency
+          ),
+          currency: config.razorpay.currency,
+          receipt: `rb-${Date.now()}`,
+          notes: {
+            userId,
+            tripId: payload.tripId,
+            fromStopId: payload.fromStopId,
+            toStopId: payload.toStopId,
+          },
+        });
+
+        gatewayOrderId = order.id;
+        gatewayMeta = {
+          orderId: order.id,
+          currency: order.currency,
+          amount: order.amount,
+          razorpayKeyId: config.razorpay.keyId,
+        };
+      } else {
+        const transactionUuid = `rb-${Date.now()}-${Math.random()
+          .toString(36)
+          .slice(2, 10)}`;
+
+        const totalAmount = roundToTwo(amounts.chargedAmount);
+        const totalAmountStr = totalAmount.toFixed(2);
+
+        // eSewa v2 signature: concatenate values in the exact order of signed_field_names
+        // Format: "total_amount={value},transaction_uuid={value},product_code={value}"
+        const signaturePayload = `total_amount=${totalAmountStr},transaction_uuid=${transactionUuid},product_code=${config.esewa.productCode}`;
+        const signature = crypto
+          .createHmac("sha256", config.esewa.secretKey)
+          .update(signaturePayload)
+          .digest("base64");
+
+        gatewayOrderId = transactionUuid;
+        gatewayMeta = {
+          formUrl: config.esewa.endpoint,
+          params: {
+            amount: totalAmountStr,
+            tax_amount: "0",
+            total_amount: totalAmountStr,
+            transaction_uuid: transactionUuid,
+            product_code: config.esewa.productCode,
+            product_service_charge: "0",
+            product_delivery_charge: "0",
+            success_url: config.esewa.successUrl,
+            failure_url: config.esewa.failureUrl,
+            signed_field_names: "total_amount,transaction_uuid,product_code",
+            signature,
+          },
+        };
+      }
+
+      let paymentRecord = await prisma.payment.create({
+        data: {
+          userId,
+          method,
+          baseAmount: amounts.baseAmount,
+          baseCurrency: amounts.baseCurrency,
+          chargedAmount: amounts.chargedAmount,
+          chargedCurrency: amounts.chargedCurrency,
+          exchangeRate: amounts.exchangeRate ?? null,
+          gatewayOrderId,
+          status: PaymentStatus.INITIATED,
+          metadata: {
+            booking: bookingMetadata,
+            gatewayMeta,
+          },
+        },
+      });
+
+      if (method === PaymentMethod.ESEWA) {
+        const updatedGatewayMeta = {
+          ...gatewayMeta,
+          params: {
+            ...gatewayMeta.params,
+            success_url: appendQueryParams(config.esewa.successUrl, {
+              paymentId: paymentRecord.id,
+            }),
+            failure_url: appendQueryParams(config.esewa.failureUrl, {
+              paymentId: paymentRecord.id,
+            }),
+            payment_id: paymentRecord.id,
+          },
+        };
+
+        paymentRecord = await prisma.payment.update({
+          where: { id: paymentRecord.id },
+          data: {
+            metadata: {
+              booking: bookingMetadata,
+              gatewayMeta: updatedGatewayMeta,
+            },
+          },
+        });
+
+        return res.status(200).json({
+          message: "Payment initiation data for eSewa",
+          paymentId: paymentRecord.id,
+          method,
+          amount: amounts.chargedAmount,
+          currency: amounts.chargedCurrency,
+          form: updatedGatewayMeta,
+        });
+      }
+
+      if (method === PaymentMethod.RAZORPAY) {
+        return res.status(200).json({
+          message: "Payment initiated via Razorpay",
+          paymentId: paymentRecord.id,
+          method,
+          amount: amounts.chargedAmount,
+          currency: amounts.chargedCurrency,
+          orderId: gatewayMeta.orderId,
+          razorpayKeyId: gatewayMeta.razorpayKeyId,
+        });
+      }
+
+      return res.status(500).json({
+        errorMessage: "Unsupported payment method",
+      });
+    } catch (error: any) {
+      console.error("Error initiating payment:", error);
+      return res.status(500).json({
+        errorMessage: error.message || "Failed to initiate payment",
+      });
+    }
+  }
+);
+
+userRouter.post(
+  "/payments/verify",
+  authenticateUser,
+  async (req: AuthRequest, res): Promise<any> => {
+    const userId = req.userId;
+
+    if (!userId) {
+      return res.status(401).json({ errorMessage: "User not authenticated" });
+    }
+
+    const validation = verifyPaymentSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        errorMessage: "Invalid payment verification data",
+        errors: validation.error.issues,
+      });
+    }
+
+    const {
+      paymentId,
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+      esewaRefId,
+    } = validation.data;
+
+    try {
+      const payment = await prisma.payment.findUnique({
+        where: { id: paymentId },
+      });
+
+      if (!payment || payment.userId !== userId) {
+        return res.status(404).json({ errorMessage: "Payment not found" });
+      }
+
+      if (payment.status !== PaymentStatus.INITIATED) {
+        return res.status(400).json({
+          errorMessage: "Payment is not in a verifiable state",
+        });
+      }
+
+      const config = getPaymentConfig();
+
+      if (payment.method === PaymentMethod.RAZORPAY) {
+        if (!razorpayOrderId || !razorpayPaymentId || !razorpaySignature) {
+          return res.status(400).json({
+            errorMessage: "Missing Razorpay verification fields",
+          });
+        }
+
+        if (payment.gatewayOrderId !== razorpayOrderId) {
+          return res.status(400).json({
+            errorMessage: "Razorpay order ID mismatch",
+          });
+        }
+
+        const expectedSignature = crypto
+          .createHmac("sha256", config.razorpay.keySecret)
+          .update(`${razorpayOrderId}|${razorpayPaymentId}`)
+          .digest("hex");
+
+        if (expectedSignature !== razorpaySignature) {
+          await prisma.payment.update({
+            where: { id: paymentId },
+            data: {
+              gatewayPaymentId: razorpayPaymentId,
+              gatewaySignature: razorpaySignature,
+              status: PaymentStatus.FAILED,
+            },
+          });
+
+          return res.status(400).json({
+            errorMessage: "Invalid Razorpay signature",
+          });
+        }
+
+        const updatedPayment = await prisma.payment.update({
+          where: { id: paymentId },
+          data: {
+            gatewayPaymentId: razorpayPaymentId,
+            gatewaySignature: razorpaySignature,
+            status: PaymentStatus.SUCCESS,
+          },
+        });
+
+        return res.status(200).json({
+          message: "Payment verified successfully",
+          paymentId: updatedPayment.id,
+          method: updatedPayment.method,
+          status: updatedPayment.status,
+        });
+      }
+
+      if (!esewaRefId) {
+        return res.status(400).json({
+          errorMessage: "Missing eSewa reference ID",
+        });
+      }
+
+      const verificationPayload = {
+        amount: payment.chargedAmount.toFixed(2),
+        referenceId: esewaRefId,
+        product_code: config.esewa.productCode,
+        transaction_uuid: payment.gatewayOrderId,
+      };
+
+      let verificationStatus = "FAILED";
+
+      try {
+        const response = await axios.post(
+          config.esewa.verificationEndpoint,
+          verificationPayload,
+          {
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+            },
+          }
+        );
+
+        const statusValue =
+          response?.data?.status ||
+          response?.data?.state ||
+          response?.data?.result;
+
+        if (typeof statusValue === "string") {
+          const normalized = statusValue.toUpperCase();
+          if (["SUCCESS", "COMPLETED", "COMPLETE", "OK"].includes(normalized)) {
+            verificationStatus = "SUCCESS";
+          }
+        }
+      } catch (verificationError) {
+        console.error("eSewa verification error:", verificationError);
+        verificationStatus = "FAILED";
+      }
+
+      if (verificationStatus !== "SUCCESS") {
+        await prisma.payment.update({
+          where: { id: paymentId },
+          data: {
+            gatewayPaymentId: esewaRefId,
+            status: PaymentStatus.FAILED,
+            metadata: {
+              ...(payment.metadata as any),
+              verification: {
+                status: "FAILED",
+                payload: verificationPayload,
+              },
+            },
+          },
+        });
+
+        return res.status(400).json({
+          errorMessage: "eSewa payment verification failed",
+        });
+      }
+
+      const updatedPayment = await prisma.payment.update({
+        where: { id: paymentId },
+        data: {
+          gatewayPaymentId: esewaRefId,
+          status: PaymentStatus.SUCCESS,
+          metadata: {
+            ...(payment.metadata as any),
+            verification: {
+              status: "SUCCESS",
+              payload: verificationPayload,
+            },
+          },
+        },
+      });
+
+      return res.status(200).json({
+        message: "Payment verified successfully",
+        paymentId: updatedPayment.id,
+        method: updatedPayment.method,
+        status: updatedPayment.status,
+      });
+    } catch (error: any) {
+      console.error("Error verifying payment:", error);
+      return res.status(500).json({
+        errorMessage: error.message || "Failed to verify payment",
+      });
+    }
+  }
+);
+
+userRouter.post(
+  "/payments/confirm",
+  authenticateUser,
+  async (req: AuthRequest, res): Promise<any> => {
+    const userId = req.userId;
+
+    if (!userId) {
+      return res.status(401).json({ errorMessage: "User not authenticated" });
+    }
+
+    const validation = confirmBookingSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        errorMessage: "Invalid booking confirmation data",
+        errors: validation.error.issues,
+      });
+    }
+
+    const { paymentId } = validation.data;
+
+    try {
+      const payment = await prisma.payment.findUnique({
+        where: { id: paymentId },
+      });
+
+      if (!payment || payment.userId !== userId) {
+        return res.status(404).json({ errorMessage: "Payment not found" });
+      }
+
+      if (payment.status !== PaymentStatus.SUCCESS) {
+        return res.status(400).json({
+          errorMessage: "Payment has not been verified successfully",
+        });
+      }
+
+      const bookingPayload = (payment.metadata as any)?.booking;
+
+      if (!bookingPayload) {
+        return res.status(400).json({
+          errorMessage: "Payment metadata missing booking information",
+        });
+      }
+
+      if (payment.bookingGroupId) {
+        const existingGroup = await prisma.bookingGroup.findUnique({
+          where: { id: payment.bookingGroupId },
+        });
+
+        if (existingGroup) {
+          return res.status(200).json({
+            message: "Booking already confirmed",
+            bookingGroupId: existingGroup.id,
+            totalPrice: existingGroup.totalPrice,
+            discountAmount: existingGroup.discountAmount,
+            finalPrice: existingGroup.finalPrice,
+            couponApplied: !!existingGroup.offerId,
+          });
+        }
+      }
+
+      const bookingValidation = bookTicketSchema.safeParse(bookingPayload);
+      if (!bookingValidation.success) {
+        return res.status(400).json({
+          errorMessage: "Stored booking data is invalid",
+          errors: bookingValidation.error.issues,
+        });
+      }
+
+      const {
+        tripId,
+        fromStopId,
+        toStopId,
+        seatIds,
+        passengers,
+        couponCode,
+        boardingPointId,
+        droppingPointId,
+        seatFares,
+        totalPrice,
+        discountAmount,
+        finalPrice,
+        offerId,
+      } = bookingPayload;
+
+      if (!Array.isArray(seatIds) || seatIds.length === 0) {
+        return res.status(400).json({
+          errorMessage: "Booking metadata missing seats",
+        });
+      }
+
       const result = await prisma.$transaction(
         async (tx) => {
-          // 1. Verify trip exists and is bookable
           const trip = await tx.trip.findUnique({
             where: { id: tripId },
             include: {
@@ -1350,53 +2106,17 @@ userRouter.post(
             throw new Error("Trip is not available for booking");
           }
 
-          // ✅ VALIDATION: Check if trip date/time has already passed
           const now = new Date();
           const tripDate = new Date(trip.tripDate);
-          tripDate.setHours(0, 0, 0, 0); // Normalize to start of day
+          tripDate.setHours(0, 0, 0, 0);
 
           const today = new Date();
-          today.setHours(0, 0, 0, 0); // Normalize to start of day
+          today.setHours(0, 0, 0, 0);
 
-          // Check if trip date is in the past
           if (tripDate < today) {
             throw new Error("Cannot book tickets for past dates");
           }
 
-          // If trip is today, check if departure time has passed
-          if (tripDate.getTime() === today.getTime()) {
-            // Get the from stop to check departure time
-            const tempFromStop = trip.bus.stops.find(
-              (s) => s.id === fromStopId
-            );
-            if (tempFromStop && tempFromStop.departureTime) {
-              try {
-                const timeParts = tempFromStop.departureTime
-                  .split(":")
-                  .map(Number);
-                const hours = timeParts[0];
-                const minutes = timeParts[1];
-
-                if (hours !== undefined && minutes !== undefined) {
-                  const departureDateTime = new Date(tripDate);
-                  departureDateTime.setHours(hours, minutes, 0, 0);
-
-                  if (departureDateTime <= now) {
-                    throw new Error(
-                      "Cannot book tickets for buses that have already departed"
-                    );
-                  }
-                }
-              } catch (err: any) {
-                if (err.message.includes("already departed")) {
-                  throw err;
-                }
-                // Ignore time parsing errors
-              }
-            }
-          }
-
-          // 2. Verify stops exist and are in correct order
           const fromStop = trip.bus.stops.find((s) => s.id === fromStopId);
           const toStop = trip.bus.stops.find((s) => s.id === toStopId);
 
@@ -1404,7 +2124,6 @@ userRouter.post(
             throw new Error("Stops not found");
           }
 
-          // Allow both forward and return trips
           if (fromStop.stopIndex === toStop.stopIndex) {
             throw new Error("From and to stops cannot be the same");
           }
@@ -1431,7 +2150,6 @@ userRouter.post(
             throw new Error("Invalid dropping point selected");
           }
 
-          // 3. Verify all seats exist and belong to this bus
           const seats = await tx.seat.findMany({
             where: {
               id: { in: seatIds },
@@ -1444,9 +2162,6 @@ userRouter.post(
             throw new Error("One or more seats are invalid or inactive");
           }
 
-          // 4. Check if any seat is already booked for overlapping segments
-          // ✅ IMPORTANT: This check runs inside transaction, so it will see the latest state
-          // and prevent race conditions for concurrent booking attempts
           const existingBookings = await tx.booking.findMany({
             where: {
               tripId,
@@ -1463,7 +2178,6 @@ userRouter.post(
             },
           });
 
-          // Check for overlaps - a seat is occupied if ANY existing booking overlaps with requested journey
           const minIndex = Math.min(fromStop.stopIndex, toStop.stopIndex);
           const maxIndex = Math.max(fromStop.stopIndex, toStop.stopIndex);
 
@@ -1473,8 +2187,6 @@ userRouter.post(
             const bookingMin = Math.min(bookingFromIdx, bookingToIdx);
             const bookingMax = Math.max(bookingFromIdx, bookingToIdx);
 
-            // Two segments overlap if: segment1.start < segment2.end AND segment1.end > segment2.start
-            // This works for both forward and return trips
             return minIndex < bookingMax && maxIndex > bookingMin;
           });
 
@@ -1491,126 +2203,35 @@ userRouter.post(
             );
           }
 
-          // 5. Calculate total price using seat-specific cumulative pricing
-          const getCumulativePriceForSeat = (stop: any, seat: any) => {
-            if (!stop) {
-              return 0;
-            }
+          const computedTotal =
+            typeof totalPrice === "number"
+              ? totalPrice
+              : seats.reduce((sum, seat) => {
+                  const seatFare = seatFares?.[seat.id] ?? 0;
+                  return sum + seatFare;
+                }, 0);
 
-            const level = (seat.level || "").toUpperCase();
-            const type = (seat.type || "").toUpperCase();
+          const computedFinal =
+            typeof finalPrice === "number"
+              ? finalPrice
+              : computedTotal - (discountAmount ?? 0);
 
-            if (level === "LOWER" && type === "SEATER") {
-              return stop.lowerSeaterPrice ?? stop.priceFromOrigin ?? 0;
-            }
-
-            if (level === "LOWER" && type === "SLEEPER") {
-              return stop.lowerSleeperPrice ?? stop.priceFromOrigin ?? 0;
-            }
-
-            if (level === "UPPER" && type === "SLEEPER") {
-              return stop.upperSleeperPrice ?? stop.priceFromOrigin ?? 0;
-            }
-
-            if (level === "UPPER" && type === "SEATER") {
-              // Fallback for potential future seat types
-              return stop.upperSeaterPrice ?? stop.priceFromOrigin ?? 0;
-            }
-
-            return stop.priceFromOrigin ?? 0;
-          };
-
-          const getSeatFare = (seat: any) => {
-            const fromPrice = getCumulativePriceForSeat(fromStop, seat);
-            const toPrice = getCumulativePriceForSeat(toStop, seat);
-            const seatSpecificFare = Math.abs(toPrice - fromPrice);
-
-            if (Number.isFinite(seatSpecificFare) && seatSpecificFare > 0) {
-              return seatSpecificFare;
-            }
-
-            const fallbackFare = Math.abs(
-              (toStop.priceFromOrigin ?? 0) - (fromStop.priceFromOrigin ?? 0)
-            );
-
-            return Number.isFinite(fallbackFare) ? fallbackFare : 0;
-          };
-
-          const totalPrice = seats.reduce((sum, seat) => {
-            return sum + getSeatFare(seat);
-          }, 0);
-
-          // 6. Apply coupon if provided
-          let appliedOffer = null;
-          let discountAmount = 0;
-          let finalPrice = totalPrice;
-
-          if (couponCode) {
-            const offer = await tx.offer.findUnique({
-              where: { code: couponCode.toUpperCase() },
-            });
-
-            if (offer && offer.isActive) {
-              const now = new Date();
-
-              // Check validity period
-              if (now >= offer.validFrom && now <= offer.validUntil) {
-                // Check usage limit
-                if (hasRemainingUsage(offer)) {
-                  // Check minimum booking amount
-                  if (
-                    !offer.minBookingAmount ||
-                    totalPrice >= offer.minBookingAmount
-                  ) {
-                    // Check bus applicability
-                    const isAdminCoupon =
-                      offer.creatorRole === OfferCreatorRole.ADMIN;
-
-                    if (
-                      (!isAdminCoupon ||
-                        trip.bus.adminId === offer.createdBy) &&
-                      (offer.applicableBuses.length === 0 ||
-                        offer.applicableBuses.includes(trip.busId))
-                    ) {
-                      // Calculate discount
-                      discountAmount = calculateDiscountAmount(
-                        offer,
-                        totalPrice
-                      );
-
-                      finalPrice = Math.max(0, totalPrice - discountAmount);
-                      appliedOffer = offer;
-
-                      // Increment usage count
-                      await tx.offer.update({
-                        where: { id: offer.id },
-                        data: { usageCount: { increment: 1 } },
-                      });
-                    }
-                  }
-                }
-              }
-            }
-          }
-
-          // 7. Create booking group
           const bookingGroup = await tx.bookingGroup.create({
             data: {
               userId,
               tripId,
               fromStopId,
               toStopId,
-              totalPrice,
-              offerId: appliedOffer?.id || null,
-              discountAmount,
-              finalPrice,
+              totalPrice: roundToTwo(computedTotal),
+              offerId: offerId ?? null,
+              discountAmount: roundToTwo(discountAmount ?? 0),
+              finalPrice: roundToTwo(computedFinal),
               boardingPointId: boardingPoint.id,
               droppingPointId: droppingPoint.id,
               status: "CONFIRMED",
             },
           });
 
-          // 8. Create individual bookings for each seat
           const bookings = await Promise.all(
             seatIds.map((seatId: string) =>
               tx.booking.create({
@@ -1624,12 +2245,14 @@ userRouter.post(
             )
           );
 
-          // 9. Create passenger records for each booking
           const passengerRecords = await Promise.all(
             bookings.map((booking) => {
               const passengerData = passengers.find(
                 (p: any) => p.seatId === booking.seatId
               );
+              if (!passengerData) {
+                throw new Error("Passenger data missing for seat");
+              }
               return tx.passenger.create({
                 data: {
                   bookingId: booking.id,
@@ -1643,6 +2266,21 @@ userRouter.post(
             })
           );
 
+          await tx.payment.update({
+            where: { id: paymentId },
+            data: {
+              bookingGroupId: bookingGroup.id,
+              status: PaymentStatus.SUCCESS,
+            },
+          });
+
+          if (offerId) {
+            await tx.offer.update({
+              where: { id: offerId },
+              data: { usageCount: { increment: 1 } },
+            });
+          }
+
           return {
             bookingGroup,
             bookings,
@@ -1652,67 +2290,56 @@ userRouter.post(
             toStop,
             boardingPoint,
             droppingPoint,
-            totalPrice,
-            discountAmount,
-            finalPrice,
-            appliedOffer,
+            totalPrice: roundToTwo(computedTotal),
+            discountAmount: roundToTwo(discountAmount ?? 0),
+            finalPrice: roundToTwo(computedFinal),
+            couponCode,
           };
         },
         {
-          maxWait: 15000, // Wait up to 15 seconds for transaction slot
-          timeout: 30000, // Allow up to 30 seconds for booking transaction
+          maxWait: 15000,
+          timeout: 30000,
         }
       );
 
-      // Get user details for notification
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { email: true, name: true },
-      });
-
-      // 10. Send notification
-      if (user) {
-        // Get trip with bus details for notification
-        const tripWithBus = await prisma.trip.findUnique({
-          where: { id: tripId },
-          include: {
-            bus: {
-              select: {
-                name: true,
-                busNumber: true,
-              },
+      const tripWithBus = await prisma.trip.findUnique({
+        where: { id: result.bookingGroup.tripId },
+        include: {
+          bus: {
+            select: {
+              name: true,
+              busNumber: true,
             },
           },
-        });
+        },
+      });
 
-        await notifyBookingConfirmed(userId, result.bookingGroup.id, {
-          busName: tripWithBus?.bus.name || "Bus",
-          busNumber: tripWithBus?.bus.busNumber || "",
-          date: tripWithBus?.tripDate.toISOString() || new Date().toISOString(),
-          from: result.fromStop.name,
-          to: result.toStop.name,
-          seatNumbers: result.seats.map((s) => s.seatNumber),
-          totalPrice: result.finalPrice,
-        });
+      await notifyBookingConfirmed(userId, result.bookingGroup.id, {
+        busName: tripWithBus?.bus.name || "Bus",
+        busNumber: tripWithBus?.bus.busNumber || "",
+        date: tripWithBus?.tripDate.toISOString() || new Date().toISOString(),
+        from: result.fromStop.name,
+        to: result.toStop.name,
+        seatNumbers: result.seats.map((s) => s.seatNumber),
+        totalPrice: result.finalPrice,
+      });
 
-        // If coupon was applied, send offer notification
-        if (result.appliedOffer) {
-          await notifyOfferApplied(
-            userId,
-            result.appliedOffer.code,
-            result.discountAmount
-          );
-        }
+      if (result.couponCode) {
+        await notifyOfferApplied(
+          userId,
+          result.couponCode,
+          result.discountAmount
+        );
       }
 
       return res.status(200).json({
-        message: "Ticket booked successfully",
+        message: "Booking confirmed successfully",
         bookingGroupId: result.bookingGroup.id,
         totalPrice: result.totalPrice,
         discountAmount: result.discountAmount,
         finalPrice: result.finalPrice,
-        couponApplied: !!result.appliedOffer,
-        seatCount: seatIds.length,
+        couponApplied: !!result.couponCode,
+        seatCount: result.seats.length,
         seatNumbers: result.seats.map((s) => s.seatNumber),
         route: {
           from: result.fromStop.name,
@@ -1740,25 +2367,10 @@ userRouter.post(
           gender: p.gender,
         })),
       });
-    } catch (e: any) {
-      console.error("Error booking ticket:", e);
-
-      // Handle specific Prisma errors
-      if (e.code === "P2003") {
-        return res.status(401).json({
-          errorMessage:
-            "User authentication error. Please sign out and sign in again.",
-        });
-      }
-
-      if (e.code === "P2025") {
-        return res.status(404).json({
-          errorMessage: "Trip or seat not found",
-        });
-      }
-
+    } catch (error: any) {
+      console.error("Error confirming payment booking:", error);
       return res.status(500).json({
-        errorMessage: e.message || "Failed to book ticket",
+        errorMessage: error.message || "Failed to confirm booking",
       });
     }
   }
