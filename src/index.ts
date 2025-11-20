@@ -15,7 +15,7 @@ const app = express();
 app.use(express.json());
 app.use(
   cors({
-   // Frontend URL
+    origin: "https://gogantabya.netlify.app/", // Frontend URL
     credentials: true, // Allow cookies
   })
 );
