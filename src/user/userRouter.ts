@@ -23,6 +23,7 @@ import {
   getUnreadCount,
   markNotificationAsRead,
 } from "../services/notificationService.js";
+import type { TicketData } from "../services/pdfService.js";
 import {
   applyCouponSchema,
   enhancedSearchSchema,
@@ -2309,9 +2310,16 @@ userRouter.post(
             select: {
               name: true,
               busNumber: true,
+              type: true,
             },
           },
         },
+      });
+
+      // Get user details for email
+      const userDetails = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { name: true, email: true },
       });
 
       await notifyBookingConfirmed(userId, result.bookingGroup.id, {
@@ -2330,6 +2338,125 @@ userRouter.post(
           result.couponCode,
           result.discountAmount
         );
+      }
+
+      // Generate PDF ticket and send email
+      try {
+        const { generateTicketPDF } = await import("../services/pdfService.js");
+        const { sendBookingConfirmationEmail } = await import(
+          "../services/brevoEmailService.js"
+        );
+
+        // Prepare ticket data
+        const ticketData = {
+          bookingGroupId: result.bookingGroup.id,
+          bookedAt: result.bookingGroup.createdAt.toISOString(),
+          user: {
+            name: userDetails?.name || "Passenger",
+            email: userDetails?.email || "",
+          },
+          trip: {
+            tripDate:
+              tripWithBus?.tripDate.toISOString() || new Date().toISOString(),
+            tripStatus: tripWithBus?.status || "ACTIVE",
+          },
+          bus: {
+            busNumber: tripWithBus?.bus.busNumber || "",
+            name: tripWithBus?.bus.name || "",
+            type: tripWithBus?.bus.type || "SEATER",
+          },
+          route: {
+            from: {
+              name: result.fromStop.name,
+              city: result.fromStop.city,
+              departureTime: result.fromStop.departureTime,
+            },
+            to: {
+              name: result.toStop.name,
+              city: result.toStop.city,
+              arrivalTime: result.toStop.arrivalTime,
+            },
+          },
+          boardingPoint: result.boardingPoint
+            ? {
+                name: result.boardingPoint.name,
+                landmark: result.boardingPoint.landmark,
+                time: result.boardingPoint.time,
+              }
+            : null,
+          droppingPoint: result.droppingPoint
+            ? {
+                name: result.droppingPoint.name,
+                landmark: result.droppingPoint.landmark,
+                time: result.droppingPoint.time,
+              }
+            : null,
+          seats: result.passengers.map((p, idx) => {
+            const seat = result.seats[idx];
+            return {
+              seatNumber: seat?.seatNumber || "",
+              seatLevel: seat?.level || "LOWER",
+              seatType: seat?.type || "SEATER",
+              fare: (seatFares as any)?.[seat?.id || ""] || 0,
+              passenger: {
+                name: p.name,
+                age: p.age,
+                gender: p.gender,
+              },
+            };
+          }),
+          pricing: {
+            totalPrice: result.totalPrice,
+            discountAmount: result.discountAmount,
+            finalPrice: result.finalPrice,
+            couponCode: result.couponCode || undefined,
+          },
+          status: "CONFIRMED" as const,
+        };
+
+        // Generate PDF
+        const pdfBuffer = await generateTicketPDF(ticketData);
+
+        // Send email with PDF attachment
+        if (userDetails?.email) {
+          await sendBookingConfirmationEmail(
+            userDetails.email,
+            userDetails.name,
+            {
+              bookingGroupId: result.bookingGroup.id,
+              busName: tripWithBus?.bus.name || "",
+              busNumber: tripWithBus?.bus.busNumber || "",
+              tripDate: new Date(
+                tripWithBus?.tripDate || new Date()
+              ).toLocaleDateString("en-IN"),
+              fromStop: result.fromStop.name,
+              toStop: result.toStop.name,
+              boardingPoint: result.boardingPoint?.name || "",
+              boardingTime: result.boardingPoint?.time || "",
+              droppingPoint: result.droppingPoint?.name || "",
+              seats: ticketData.seats.map((s) => ({
+                seatNumber: s.seatNumber,
+                passengerName: s.passenger.name,
+                age: s.passenger.age,
+                gender: s.passenger.gender,
+                level: s.seatLevel,
+                type: s.seatType,
+              })),
+              totalPrice: result.totalPrice,
+              discountAmount: result.discountAmount,
+              finalPrice: result.finalPrice,
+              couponCode: result.couponCode,
+              bookedAt: result.bookingGroup.createdAt.toLocaleString("en-IN"),
+            },
+            pdfBuffer
+          );
+          console.log(
+            "✅ Booking confirmation email with PDF sent successfully"
+          );
+        }
+      } catch (pdfError) {
+        console.error("Error generating PDF or sending email:", pdfError);
+        // Don't fail the booking if PDF/email fails
       }
 
       return res.status(200).json({
@@ -2769,6 +2896,162 @@ userRouter.get(
       console.error("Error fetching booking details:", e);
       return res.status(500).json({
         errorMessage: "Failed to fetch booking details",
+      });
+    }
+  }
+);
+
+/**
+ * GET /user/booking/download-ticket/:groupId
+ * Download booking ticket as PDF
+ */
+userRouter.get(
+  "/booking/download-ticket/:groupId",
+  authenticateUser,
+  async (req: AuthRequest, res): Promise<any> => {
+    const { groupId } = req.params;
+    const userId = req.userId;
+
+    if (!userId) {
+      return res.status(401).json({ errorMessage: "User not authenticated" });
+    }
+
+    if (!groupId) {
+      return res.status(400).json({ errorMessage: "Group ID is required" });
+    }
+
+    try {
+      // Fetch complete booking details
+      const bookingGroup = await prisma.bookingGroup.findUnique({
+        where: { id: groupId },
+        include: {
+          user: {
+            select: {
+              name: true,
+              email: true,
+            },
+          },
+          trip: {
+            include: {
+              bus: {
+                select: {
+                  busNumber: true,
+                  name: true,
+                  type: true,
+                },
+              },
+            },
+          },
+          fromStop: true,
+          toStop: true,
+          boardingPoint: true,
+          droppingPoint: true,
+          offer: {
+            select: {
+              code: true,
+            },
+          },
+          bookings: {
+            include: {
+              seat: true,
+              passenger: true,
+            },
+          },
+        },
+      });
+
+      if (!bookingGroup) {
+        return res.status(404).json({ errorMessage: "Booking not found" });
+      }
+
+      // Verify ownership
+      if (bookingGroup.userId !== userId) {
+        return res.status(403).json({
+          errorMessage: "Unauthorized: This booking doesn't belong to you",
+        });
+      }
+
+      const { generateTicketPDF } = await import("../services/pdfService.js");
+
+      // Prepare ticket data
+      const ticketData = {
+        bookingGroupId: bookingGroup.id,
+        bookedAt: bookingGroup.createdAt.toISOString(),
+        user: {
+          name: bookingGroup.user.name,
+          email: bookingGroup.user.email,
+        },
+        trip: {
+          tripDate: bookingGroup.trip.tripDate.toISOString(),
+          tripStatus: bookingGroup.trip.status,
+        },
+        bus: {
+          busNumber: bookingGroup.trip.bus.busNumber,
+          name: bookingGroup.trip.bus.name,
+          type: bookingGroup.trip.bus.type,
+        },
+        route: {
+          from: {
+            name: bookingGroup.fromStop.name,
+            city: bookingGroup.fromStop.city,
+            departureTime: bookingGroup.fromStop.departureTime,
+          },
+          to: {
+            name: bookingGroup.toStop.name,
+            city: bookingGroup.toStop.city,
+            arrivalTime: bookingGroup.toStop.arrivalTime,
+          },
+        },
+        boardingPoint: bookingGroup.boardingPoint
+          ? {
+              name: bookingGroup.boardingPoint.name,
+              landmark: bookingGroup.boardingPoint.landmark,
+              time: bookingGroup.boardingPoint.time,
+            }
+          : null,
+        droppingPoint: bookingGroup.droppingPoint
+          ? {
+              name: bookingGroup.droppingPoint.name,
+              landmark: bookingGroup.droppingPoint.landmark,
+              time: bookingGroup.droppingPoint.time,
+            }
+          : null,
+        seats: bookingGroup.bookings.map((booking) => ({
+          seatNumber: booking.seat.seatNumber,
+          seatLevel: booking.seat.level,
+          seatType: booking.seat.type,
+          fare: 0, // Calculate if needed from stop prices
+          passenger: {
+            name: booking.passenger?.name || "Passenger",
+            age: booking.passenger?.age || 0,
+            gender: booking.passenger?.gender || "MALE",
+          },
+        })),
+        pricing: {
+          totalPrice: bookingGroup.totalPrice,
+          discountAmount: bookingGroup.discountAmount || 0,
+          finalPrice: bookingGroup.finalPrice || bookingGroup.totalPrice,
+          couponCode: bookingGroup.offer?.code,
+        },
+        status: bookingGroup.status,
+      } as TicketData;
+
+      // Generate PDF
+      const pdfBuffer = await generateTicketPDF(ticketData);
+
+      // Set response headers for PDF download
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=ticket-${groupId}.pdf`
+      );
+      res.setHeader("Content-Length", pdfBuffer.length);
+
+      return res.send(pdfBuffer);
+    } catch (error) {
+      console.error("Error generating ticket PDF:", error);
+      return res.status(500).json({
+        errorMessage: "Failed to generate ticket PDF",
       });
     }
   }
