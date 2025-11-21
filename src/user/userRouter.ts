@@ -238,10 +238,19 @@ const prepareBookingDetails = async (
         const departureDateTime = new Date(tripDate);
         departureDateTime.setHours(hours, minutes, 0, 0);
 
-        if (departureDateTime <= now) {
-          throw new Error(
-            "Cannot book tickets for buses that have already departed"
-          );
+        // 30-minute cutoff rule
+        const cutoffTime = new Date(departureDateTime.getTime() - 30 * 60000);
+
+        if (now > cutoffTime) {
+          // If now is past the cutoff (e.g. 15:31 for 16:00 bus)
+          // Check if it's actually departed or just booking closed
+          if (now > departureDateTime) {
+            throw new Error(
+              "Cannot book tickets for buses that have already departed"
+            );
+          } else {
+            throw new Error("Booking closes 30 minutes before departure.");
+          }
         }
       }
     }
@@ -301,6 +310,13 @@ const prepareBookingDetails = async (
   const conflictingBookings = existingBookings.filter((booking) => {
     const bookingFromIdx = booking.group.fromStop.stopIndex;
     const bookingToIdx = booking.group.toStop.stopIndex;
+
+    // Check if booking is in the same direction
+    const bookingIsReturnTrip = bookingFromIdx > bookingToIdx;
+    if (bookingIsReturnTrip !== isReturnTrip) {
+      return false;
+    }
+
     const bookingMin = Math.min(bookingFromIdx, bookingToIdx);
     const bookingMax = Math.max(bookingFromIdx, bookingToIdx);
 
@@ -844,9 +860,23 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
     sortOrder,
   } = req.body;
 
+  // Trim locations to avoid issues with trailing spaces
+  const trimmedStartLocation =
+    typeof startLocation === "string" ? startLocation.trim() : startLocation;
+  const trimmedEndLocation =
+    typeof endLocation === "string" ? endLocation.trim() : endLocation;
+
   // Try enhanced schema first, fall back to basic schema
-  const enhancedValidation = enhancedSearchSchema.safeParse(req.body);
-  const basicValidation = busSearchSchema.safeParse(req.body);
+  const enhancedValidation = enhancedSearchSchema.safeParse({
+    ...req.body,
+    startLocation: trimmedStartLocation,
+    endLocation: trimmedEndLocation,
+  });
+  const basicValidation = busSearchSchema.safeParse({
+    ...req.body,
+    startLocation: trimmedStartLocation,
+    endLocation: trimmedEndLocation,
+  });
 
   if (!enhancedValidation.success && !basicValidation.success) {
     return res.status(400).json({
@@ -876,8 +906,8 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
         stops: {
           some: {
             OR: [
-              { name: { contains: startLocation, mode: "insensitive" } },
-              { city: { contains: startLocation, mode: "insensitive" } },
+              { name: { contains: trimmedStartLocation, mode: "insensitive" } },
+              { city: { contains: trimmedStartLocation, mode: "insensitive" } },
             ],
           },
         },
@@ -936,8 +966,8 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
         stops: {
           some: {
             OR: [
-              { name: { contains: startLocation, mode: "insensitive" } },
-              { city: { contains: startLocation, mode: "insensitive" } },
+              { name: { contains: trimmedStartLocation, mode: "insensitive" } },
+              { city: { contains: trimmedStartLocation, mode: "insensitive" } },
             ],
           },
         },
@@ -1030,14 +1060,14 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
         // User searched for "startLocation" → "endLocation"
         const fromStop = stops.find(
           (s) =>
-            s.name.toLowerCase().includes(startLocation.toLowerCase()) ||
-            s.city.toLowerCase().includes(startLocation.toLowerCase())
+            s.name.toLowerCase().includes(trimmedStartLocation.toLowerCase()) ||
+            s.city.toLowerCase().includes(trimmedStartLocation.toLowerCase())
         );
 
         const toStop = stops.find(
           (s) =>
-            s.name.toLowerCase().includes(endLocation.toLowerCase()) ||
-            s.city.toLowerCase().includes(endLocation.toLowerCase())
+            s.name.toLowerCase().includes(trimmedEndLocation.toLowerCase()) ||
+            s.city.toLowerCase().includes(trimmedEndLocation.toLowerCase())
         );
 
         // If stops not found, skip
@@ -1130,12 +1160,19 @@ userRouter.post("/showbus", async (req, res): Promise<any> => {
           : toStop.arrivalTime;
 
         // Calculate duration in minutes
-        const duration =
-          arrivalTime && departureTime
-            ? (new Date(`1970-01-01T${arrivalTime}`).getTime() -
-                new Date(`1970-01-01T${departureTime}`).getTime()) /
-              (1000 * 60)
-            : 0;
+        let duration = 0;
+        if (arrivalTime && departureTime) {
+          const dep = new Date(`1970-01-01T${departureTime}`);
+          const arr = new Date(`1970-01-01T${arrivalTime}`);
+          let diffMs = arr.getTime() - dep.getTime();
+
+          // Handle overnight trips (arrival is next day)
+          if (diffMs < 0) {
+            diffMs += 24 * 60 * 60 * 1000; // Add 24 hours
+          }
+
+          duration = diffMs / (1000 * 60);
+        }
 
         return {
           tripId: trip.id,
@@ -1763,12 +1800,9 @@ userRouter.post(
           ...gatewayMeta,
           params: {
             ...gatewayMeta.params,
-            success_url: appendQueryParams(config.esewa.successUrl, {
-              paymentId: paymentRecord.id,
-            }),
-            failure_url: appendQueryParams(config.esewa.failureUrl, {
-              paymentId: paymentRecord.id,
-            }),
+            // Use path parameters instead of query parameters to avoid issues with eSewa appending ?data=...
+            success_url: `${config.esewa.successUrl}/${paymentRecord.id}`,
+            failure_url: `${config.esewa.failureUrl}/${paymentRecord.id}`,
             payment_id: paymentRecord.id,
           },
         };
@@ -1917,25 +1951,20 @@ userRouter.post(
       }
 
       const verificationPayload = {
-        amount: payment.chargedAmount.toFixed(2),
-        referenceId: esewaRefId,
         product_code: config.esewa.productCode,
+        total_amount: payment.chargedAmount.toFixed(2),
         transaction_uuid: payment.gatewayOrderId,
       };
 
       let verificationStatus = "FAILED";
 
       try {
-        const response = await axios.post(
-          config.esewa.verificationEndpoint,
-          verificationPayload,
-          {
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json",
-            },
-          }
-        );
+        const response = await axios.get(config.esewa.verificationEndpoint, {
+          params: verificationPayload,
+          headers: {
+            Accept: "application/json",
+          },
+        });
 
         const statusValue =
           response?.data?.status ||
@@ -2190,10 +2219,18 @@ userRouter.post(
 
           const minIndex = Math.min(fromStop.stopIndex, toStop.stopIndex);
           const maxIndex = Math.max(fromStop.stopIndex, toStop.stopIndex);
+          const isReturnTrip = fromStop.stopIndex > toStop.stopIndex;
 
           const conflictingBookings = existingBookings.filter((booking) => {
             const bookingFromIdx = booking.group.fromStop.stopIndex;
             const bookingToIdx = booking.group.toStop.stopIndex;
+
+            // Check if booking is in the same direction
+            const bookingIsReturnTrip = bookingFromIdx > bookingToIdx;
+            if (bookingIsReturnTrip !== isReturnTrip) {
+              return false;
+            }
+
             const bookingMin = Math.min(bookingFromIdx, bookingToIdx);
             const bookingMax = Math.max(bookingFromIdx, bookingToIdx);
 

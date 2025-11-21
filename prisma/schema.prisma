@@ -272,8 +272,8 @@ model Booking {
   cancelledAt DateTime?
   createdAt   DateTime   @default(now())
 
-  // CRITICAL: Prevent double booking - only one CONFIRMED booking per seat per trip
-  @@unique([tripId, seatId], name: "unique_trip_seat")
+  // Removed unique constraint to allow segment bookings (A->B, B->C) and return trips on same seat
+  // @@unique([tripId, seatId], name: "unique_trip_seat")
   @@index([tripId, status])
   @@index([groupId])
 }
