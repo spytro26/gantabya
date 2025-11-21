@@ -102,7 +102,7 @@ superAdminRouter.post("/signin", async (req, res): Promise<any> => {
 
     // Set token in HTTP-only cookie - configured for cross-origin requests
     const isProduction = process.env.NODE_ENV === "production";
-    
+
     res.cookie("superAdminToken", token, {
       httpOnly: true,
       secure: isProduction,

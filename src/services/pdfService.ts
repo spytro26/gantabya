@@ -67,6 +67,7 @@ export interface TicketData {
 /**
  * Generate PDF ticket for a booking
  * Returns a Buffer containing the PDF data
+ * Designed to fit on a single page with beautiful, modern layout
  */
 export async function generateTicketPDF(
   ticketData: TicketData
@@ -75,7 +76,8 @@ export async function generateTicketPDF(
     try {
       const doc = new PDFDocument({
         size: "A4",
-        margins: { top: 50, bottom: 50, left: 50, right: 50 },
+        margins: { top: 40, bottom: 40, left: 40, right: 40 },
+        bufferPages: true,
       });
 
       const buffers: Buffer[] = [];
@@ -86,7 +88,53 @@ export async function generateTicketPDF(
       });
       doc.on("error", reject);
 
-      // Try to add logo (if available)
+      const pageWidth = 595;
+      const pageHeight = 842;
+      const margin = 40;
+      const contentWidth = pageWidth - 2 * margin;
+
+      // --- Helper Functions ---
+      const drawSectionHeader = (text: string, y: number) => {
+        doc.roundedRect(margin, y, contentWidth, 25, 4).fill("#f1f5f9");
+        doc
+          .fillColor("#334155")
+          .font("Helvetica-Bold")
+          .fontSize(10)
+          .text(text.toUpperCase(), margin + 10, y + 8);
+      };
+
+      const drawLabelValue = (
+        label: string,
+        value: string,
+        x: number,
+        y: number,
+        width: number
+      ) => {
+        doc
+          .font("Helvetica")
+          .fontSize(8)
+          .fillColor("#64748b")
+          .text(label, x, y);
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(10)
+          .fillColor("#0f172a")
+          .text(value, x, y + 12, { width: width, ellipsis: true });
+      };
+
+      // ==================== HEADER ====================
+      // Blue Header Bar - Matching Navbar (Indigo 700)
+      doc.rect(0, 0, pageWidth, 100).fill("#4338ca");
+
+      // Logo & Title Centered
+      const logoSize = 50;
+      const title = "Go Gantabya";
+      doc.font("Helvetica-Bold").fontSize(24);
+      const titleWidth = doc.widthOfString(title);
+      const totalHeaderWidth = logoSize + 15 + titleWidth;
+      const startX = (pageWidth - totalHeaderWidth) / 2;
+
+      // Logo - Circular
       try {
         const logoPath = path.join(
           __dirname,
@@ -97,316 +145,321 @@ export async function generateTicketPDF(
           "public",
           "buslogo.jpg"
         );
-        doc.image(logoPath, 50, 45, { width: 60 });
-      } catch (err) {
-        console.log("Logo not found, skipping");
+
+        doc.save();
+        doc
+          .circle(startX + logoSize / 2, 30 + logoSize / 2, logoSize / 2)
+          .clip();
+        doc.image(logoPath, startX, 30, { width: logoSize, height: logoSize });
+        doc.restore();
+      } catch (e) {
+        // Fallback if image fails - just a circle
+        doc
+          .circle(startX + logoSize / 2, 30 + logoSize / 2, logoSize / 2)
+          .fill("#ffffff");
       }
 
-      // Header
+      // Title
       doc
+        .fillColor("#ffffff")
         .fontSize(24)
-        .fillColor("#007bff")
-        .text("Go Gantabya", 120, 50, { align: "left" });
+        .text(title, startX + logoSize + 15, 38);
+
       doc
         .fontSize(10)
-        .fillColor("#666")
-        .text("Your Journey Partner", 120, 78, { align: "left" });
+        .fillColor("#e0e7ff") // Lighter indigo for subtitle
+        .text("Your Journey Partner", startX + logoSize + 15, 65);
 
-      // Title
-      doc.moveDown(2);
+      // ==================== TICKET INFO BAR ====================
+      let currentY = 120;
+
+      // Container Border
       doc
-        .fontSize(20)
-        .fillColor("#333")
-        .text("Bus Ticket", { align: "center", underline: true });
+        .roundedRect(margin, currentY, contentWidth, 60, 8)
+        .strokeColor("#e2e8f0")
+        .lineWidth(1)
+        .stroke();
 
-      doc.moveDown(0.5);
+      // 4 Columns: Booking ID | Booked By | Booked On | Status
+      const colW = contentWidth / 4;
 
-      // Booking Status Badge
+      drawLabelValue(
+        "Booking Reference",
+        ticketData.bookingGroupId.substring(0, 8).toUpperCase(),
+        margin + 15,
+        currentY + 15,
+        colW - 20
+      );
+      drawLabelValue(
+        "Booked By",
+        ticketData.user.name,
+        margin + colW + 15,
+        currentY + 15,
+        colW - 20
+      );
+      drawLabelValue(
+        "Booked On",
+        new Date(ticketData.bookedAt).toLocaleDateString("en-IN"),
+        margin + 2 * colW + 15,
+        currentY + 15,
+        colW - 20
+      );
+
+      // Status Badge
       const statusColor =
         ticketData.status === "CONFIRMED" ? "#22c55e" : "#ef4444";
       doc
-        .fontSize(12)
-        .fillColor(statusColor)
-        .text(`Status: ${ticketData.status}`, { align: "center" });
-
-      doc.moveDown(1);
-
-      // Booking ID
+        .roundedRect(margin + 3 * colW + 15, currentY + 15, 80, 25, 4)
+        .fill(statusColor);
       doc
+        .fillColor("#ffffff")
+        .font("Helvetica-Bold")
         .fontSize(10)
-        .fillColor("#666")
-        .text(`Booking ID: ${ticketData.bookingGroupId}`, { align: "center" });
-      doc
-        .fontSize(9)
-        .fillColor("#999")
-        .text(
-          `Booked on: ${new Date(ticketData.bookedAt).toLocaleString("en-IN")}`,
-          {
-            align: "center",
-          }
-        );
+        .text(ticketData.status, margin + 3 * colW + 15, currentY + 22, {
+          width: 80,
+          align: "center",
+        });
 
-      doc.moveDown(1.5);
+      currentY += 80;
 
-      // Divider
-      doc
-        .strokeColor("#ddd")
-        .lineWidth(1)
-        .moveTo(50, doc.y)
-        .lineTo(545, doc.y)
-        .stroke();
+      // ==================== JOURNEY DETAILS ====================
+      drawSectionHeader("Journey Information", currentY);
+      currentY += 35;
 
-      doc.moveDown(1);
+      // Bus Details (Left) & Route Details (Right)
+      const midPoint = pageWidth / 2;
 
-      // Bus Information
-      doc
-        .fontSize(14)
-        .fillColor("#007bff")
-        .text("Bus Details", { underline: true });
-      doc.moveDown(0.5);
-      doc.fontSize(11).fillColor("#333");
-      doc.text(`Bus Name: ${ticketData.bus.name}`, { continued: false });
-      doc.text(`Bus Number: ${ticketData.bus.busNumber}`);
-      doc.text(`Type: ${ticketData.bus.type}`);
-      doc.text(
-        `Journey Date: ${new Date(ticketData.trip.tripDate).toLocaleDateString(
-          "en-IN"
-        )}`
+      // Bus Info
+      drawLabelValue(
+        "Bus Operator",
+        ticketData.bus.name,
+        margin + 10,
+        currentY,
+        150
+      );
+      drawLabelValue(
+        "Bus Number",
+        ticketData.bus.busNumber,
+        margin + 10,
+        currentY + 30,
+        150
+      );
+      drawLabelValue(
+        "Bus Type",
+        ticketData.bus.type,
+        margin + 10,
+        currentY + 60,
+        150
       );
 
-      doc.moveDown(1);
-
-      // Route Information
+      // Route Arrow (Simple ASCII)
       doc
-        .fontSize(14)
-        .fillColor("#007bff")
-        .text("Journey Details", { underline: true });
-      doc.moveDown(0.5);
-      doc.fontSize(11).fillColor("#333");
-      doc.text(
-        `From: ${ticketData.route.from.name}, ${ticketData.route.from.city}`
+        .fontSize(20)
+        .fillColor("#cbd5e1")
+        .text(">", midPoint - 10, currentY + 20);
+
+      // Route Info
+      drawLabelValue(
+        "From",
+        ticketData.route.from.city,
+        midPoint + 20,
+        currentY,
+        150
       );
-      if (ticketData.route.from.departureTime) {
-        doc.text(`Departure Time: ${ticketData.route.from.departureTime}`);
-      }
-      doc.moveDown(0.3);
-      doc.text(`To: ${ticketData.route.to.name}, ${ticketData.route.to.city}`);
-      if (ticketData.route.to.arrivalTime) {
-        doc.text(`Arrival Time: ${ticketData.route.to.arrivalTime}`);
-      }
+      drawLabelValue(
+        "To",
+        ticketData.route.to.city,
+        midPoint + 20,
+        currentY + 30,
+        150
+      );
+      drawLabelValue(
+        "Travel Date",
+        new Date(ticketData.trip.tripDate).toLocaleDateString("en-IN", {
+          weekday: "long",
+          year: "numeric",
+          month: "long",
+          day: "numeric",
+        }),
+        midPoint + 20,
+        currentY + 60,
+        200
+      );
 
-      doc.moveDown(1);
+      currentY += 100;
 
-      // Boarding & Dropping Points
+      // ==================== BOARDING & DROPPING ====================
+      drawSectionHeader("Boarding & Dropping", currentY);
+      currentY += 35;
+
+      // Boarding (Left)
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(11)
+        .fillColor("#0f172a")
+        .text("Boarding Point", margin + 10, currentY + 2);
       if (ticketData.boardingPoint) {
         doc
-          .fontSize(14)
-          .fillColor("#007bff")
-          .text("Boarding Point", { underline: true });
-        doc.moveDown(0.5);
-        doc.fontSize(11).fillColor("#333");
-        doc.text(`Location: ${ticketData.boardingPoint.name}`);
+          .font("Helvetica-Bold")
+          .fontSize(12)
+          .fillColor("#4338ca") // Indigo
+          .text(ticketData.boardingPoint.time, margin + 10, currentY + 20);
+        doc
+          .font("Helvetica")
+          .fontSize(10)
+          .fillColor("#334155")
+          .text(ticketData.boardingPoint.name, margin + 10, currentY + 38, {
+            width: 200,
+          });
         if (ticketData.boardingPoint.landmark) {
-          doc.text(`Landmark: ${ticketData.boardingPoint.landmark}`);
+          doc
+            .fontSize(9)
+            .fillColor("#64748b")
+            .text(
+              ticketData.boardingPoint.landmark,
+              margin + 10,
+              currentY + 52,
+              { width: 200 }
+            );
         }
-        doc.text(`Time: ${ticketData.boardingPoint.time}`);
-        doc.moveDown(0.5);
       }
 
+      // Dropping (Right)
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(11)
+        .fillColor("#0f172a")
+        .text("Dropping Point", midPoint + 20, currentY + 2);
       if (ticketData.droppingPoint) {
         doc
-          .fontSize(14)
-          .fillColor("#007bff")
-          .text("Dropping Point", { underline: true });
-        doc.moveDown(0.5);
-        doc.fontSize(11).fillColor("#333");
-        doc.text(`Location: ${ticketData.droppingPoint.name}`);
+          .font("Helvetica-Bold")
+          .fontSize(12)
+          .fillColor("#4338ca") // Indigo
+          .text(ticketData.droppingPoint.time, midPoint + 20, currentY + 20);
+        doc
+          .font("Helvetica")
+          .fontSize(10)
+          .fillColor("#334155")
+          .text(ticketData.droppingPoint.name, midPoint + 20, currentY + 38, {
+            width: 200,
+          });
         if (ticketData.droppingPoint.landmark) {
-          doc.text(`Landmark: ${ticketData.droppingPoint.landmark}`);
+          doc
+            .fontSize(9)
+            .fillColor("#64748b")
+            .text(
+              ticketData.droppingPoint.landmark,
+              midPoint + 20,
+              currentY + 52,
+              { width: 200 }
+            );
         }
-        doc.text(`Time: ${ticketData.droppingPoint.time}`);
-        doc.moveDown(1);
       }
 
-      // Passenger Details Table
-      doc
-        .fontSize(14)
-        .fillColor("#007bff")
-        .text("Passenger & Seat Details", { underline: true });
-      doc.moveDown(0.5);
+      currentY += 80;
 
-      const tableTop = doc.y;
-      const colWidths = [120, 80, 60, 60, 80];
-      const headers = [
-        "Passenger Name",
-        "Seat No.",
-        "Age",
-        "Gender",
-        "Seat Type",
-      ];
+      // ==================== PASSENGERS ====================
+      drawSectionHeader("Passenger Details", currentY);
+      currentY += 35;
 
       // Table Header
-      doc.fontSize(10).fillColor("#fff");
-      doc.rect(50, tableTop, 495, 20).fill("#007bff");
-      let xPos = 55;
-      headers.forEach((header, i) => {
-        const colWidth = colWidths[i];
-        if (colWidth) {
-          doc.text(header, xPos, tableTop + 5, {
-            width: colWidth,
-            align: "left",
-          });
-          xPos += colWidth;
-        }
+      const tableHeaders = ["Seat", "Passenger Name", "Age", "Gender", "Type"];
+      const colWidths = [50, 200, 50, 80, 100];
+      let x = margin + 10;
+
+      doc.font("Helvetica-Bold").fontSize(9).fillColor("#64748b");
+      tableHeaders.forEach((h, i) => {
+        doc.text(h, x, currentY);
+        x += colWidths[i] || 0;
       });
 
-      // Table Rows
-      let yPos = tableTop + 25;
-      doc.fillColor("#333").fontSize(9);
-      ticketData.seats.forEach((seat, index) => {
-        if (yPos > 700) {
-          doc.addPage();
-          yPos = 50;
-        }
-
-        const bg = index % 2 === 0 ? "#f9f9f9" : "#ffffff";
-        doc.rect(50, yPos - 3, 495, 20).fill(bg);
-
-        xPos = 55;
-        doc.fillColor("#333");
-        const col0 = colWidths[0];
-        const col1 = colWidths[1];
-        const col2 = colWidths[2];
-        const col3 = colWidths[3];
-        const col4 = colWidths[4];
-
-        if (col0) {
-          doc.text(seat.passenger.name, xPos, yPos, {
-            width: col0,
-            align: "left",
-          });
-          xPos += col0;
-        }
-        if (col1) {
-          doc.text(seat.seatNumber, xPos, yPos, { width: col1, align: "left" });
-          xPos += col1;
-        }
-        if (col2) {
-          doc.text(String(seat.passenger.age), xPos, yPos, {
-            width: col2,
-            align: "left",
-          });
-          xPos += col2;
-        }
-        if (col3) {
-          doc.text(seat.passenger.gender, xPos, yPos, {
-            width: col3,
-            align: "left",
-          });
-          xPos += col3;
-        }
-        if (col4) {
-          doc.text(`${seat.seatLevel} ${seat.seatType}`, xPos, yPos, {
-            width: col4,
-            align: "left",
-          });
-        }
-
-        yPos += 20;
-      });
-
-      doc.moveDown(2);
-
-      // Pricing Details
+      currentY += 15;
       doc
-        .fontSize(14)
-        .fillColor("#007bff")
-        .text("Fare Breakdown", { underline: true });
-      doc.moveDown(0.5);
-      doc.fontSize(11).fillColor("#333");
+        .moveTo(margin, currentY)
+        .lineTo(pageWidth - margin, currentY)
+        .strokeColor("#e2e8f0")
+        .stroke();
+      currentY += 10;
 
-      const fareX = 350;
-      doc.text("Total Fare:", 50, doc.y);
-      doc.text(
-        `₹${ticketData.pricing.totalPrice.toFixed(2)}`,
-        fareX,
-        doc.y - 13,
-        {
-          align: "right",
-        }
-      );
+      // Rows
+      doc.font("Helvetica").fontSize(10).fillColor("#0f172a");
+      ticketData.seats.forEach((seat) => {
+        x = margin + 10;
+        doc.font("Helvetica-Bold").text(seat.seatNumber, x, currentY);
+        x += colWidths[0] || 0;
+        doc.font("Helvetica").text(seat.passenger.name, x, currentY);
+        x += colWidths[1] || 0;
+        doc.text(seat.passenger.age.toString(), x, currentY);
+        x += colWidths[2] || 0;
+        doc.text(seat.passenger.gender, x, currentY);
+        x += colWidths[3] || 0;
+        doc.text(`${seat.seatLevel} ${seat.seatType}`, x, currentY);
 
-      if (
-        ticketData.pricing.couponCode &&
-        ticketData.pricing.discountAmount > 0
-      ) {
-        doc.moveDown(0.3);
+        currentY += 20;
+      });
+
+      currentY += 20;
+
+      // ==================== PAYMENT ====================
+      // Right aligned payment box
+      const paymentBoxWidth = 250;
+      const paymentBoxX = pageWidth - margin - paymentBoxWidth;
+
+      doc
+        .roundedRect(paymentBoxX, currentY, paymentBoxWidth, 90, 8)
+        .fill("#f8fafc");
+
+      let payY = currentY + 15;
+      const drawPayRow = (
+        label: string,
+        amount: string,
+        isBold: boolean = false,
+        color: string = "#0f172a"
+      ) => {
         doc
-          .fillColor("#22c55e")
-          .text(`Discount (${ticketData.pricing.couponCode}):`, 50, doc.y);
-        doc.text(
-          `-₹${ticketData.pricing.discountAmount.toFixed(2)}`,
-          fareX,
-          doc.y - 13,
-          {
+          .font(isBold ? "Helvetica-Bold" : "Helvetica")
+          .fontSize(10)
+          .fillColor("#334155")
+          .text(label, paymentBoxX + 15, payY);
+        doc
+          .font(isBold ? "Helvetica-Bold" : "Helvetica")
+          .fontSize(10)
+          .fillColor(color)
+          .text(amount, paymentBoxX + 15, payY, {
+            width: paymentBoxWidth - 30,
             align: "right",
-          }
+          });
+        payY += 20;
+      };
+
+      drawPayRow("Total Fare", `₹${ticketData.pricing.totalPrice.toFixed(2)}`);
+      if (ticketData.pricing.discountAmount > 0) {
+        drawPayRow(
+          "Discount",
+          `-₹${ticketData.pricing.discountAmount.toFixed(2)}`,
+          false,
+          "#22c55e"
         );
       }
-
-      doc.moveDown(0.5);
       doc
-        .strokeColor("#007bff")
-        .lineWidth(1)
-        .moveTo(50, doc.y)
-        .lineTo(545, doc.y)
+        .moveTo(paymentBoxX + 15, payY - 5)
+        .lineTo(paymentBoxX + paymentBoxWidth - 15, payY - 5)
+        .strokeColor("#cbd5e1")
         .stroke();
-
-      doc.moveDown(0.3);
-      doc.fontSize(13).fillColor("#007bff").text("Final Amount:", 50, doc.y);
-      doc.text(
+      drawPayRow(
+        "Total Amount",
         `₹${ticketData.pricing.finalPrice.toFixed(2)}`,
-        fareX,
-        doc.y - 15,
-        {
-          align: "right",
-        }
+        true,
+        "#4338ca" // Indigo to match header
       );
 
-      doc.moveDown(2);
-
-      // Footer
+      // ==================== FOOTER ====================
+      const footerY = pageHeight - 60;
       doc
-        .strokeColor("#ddd")
-        .lineWidth(1)
-        .moveTo(50, doc.y)
-        .lineTo(545, doc.y)
-        .stroke();
-
-      doc.moveDown(0.5);
-      doc.fontSize(9).fillColor("#666");
-      doc.text(
-        "⚠ Important: Please arrive at the boarding point 15 minutes before departure time.",
-        {
-          align: "center",
-        }
-      );
-      doc.moveDown(0.3);
-      doc.text("Show this ticket to the bus conductor. Have a safe journey!", {
-        align: "center",
-      });
-
-      doc.moveDown(1);
-      doc.fontSize(8).fillColor("#999");
-      doc.text("For support, contact us at support@gogantabya.com", {
-        align: "center",
-      });
-      doc.text(
-        "This is a computer-generated ticket and does not require a signature.",
-        {
-          align: "center",
-        }
-      );
+        .font("Helvetica-Oblique")
+        .fontSize(12)
+        .fillColor("#64748b")
+        .text("Have a safe journey!", 0, footerY, { align: "center" });
 
       doc.end();
     } catch (error) {

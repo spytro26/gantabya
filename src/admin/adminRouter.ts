@@ -280,7 +280,7 @@ adminRouter.post("/signin", async (req, res): Promise<any> => {
 
     // Set token in cookie - configured for cross-origin requests
     const isProduction = process.env.NODE_ENV === "production";
-    
+
     res.cookie("adminToken", token, {
       httpOnly: true,
       secure: isProduction,
