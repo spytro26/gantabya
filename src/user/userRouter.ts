@@ -566,9 +566,18 @@ userRouter.post("/signin", async (req, res): Promise<any> => {
     return res.json({ errorMessage: "internal server error" });
   }
   const token = jwt.sign((userFound?.id).toString(), JWT_SECRET);
+  
+  // Cookie configuration for cross-origin requests
+  const isProduction = process.env.NODE_ENV === "production";
+  
   return res
     .status(200)
-    .cookie("token", token, { httpOnly: true, secure: true })
+    .cookie("token", token, { 
+      httpOnly: true, 
+      secure: isProduction, // Only use secure in production (HTTPS)
+      sameSite: isProduction ? "none" : "lax", // "none" required for cross-origin in production
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    })
     .json({ message: "user signed in successfully" });
 });
 

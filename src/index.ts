@@ -13,12 +13,34 @@ export type PrismaClientType = typeof prisma;
 
 const app = express();
 app.use(express.json());
+
+// CORS Configuration - Allow multiple origins
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'https://gogantabya.netlify.app'
+];
+
 app.use(
   cors({
-    origin: "https://gogantabya.netlify.app", // Frontend URL
+    origin: (origin, callback) => {
+      // Allow requests with no origin (like mobile apps, Postman, etc.)
+      if (!origin) return callback(null, true);
+      
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.warn(`⚠️  Blocked CORS request from origin: ${origin}`);
+        callback(new Error('Not allowed by CORS'));
+      }
+    },
     credentials: true, // Allow cookies
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Cookie'],
+    exposedHeaders: ['Set-Cookie'],
   })
 );
+
 app.use(cookieParser());
 
 app.use("/user", userRouter);

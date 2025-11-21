@@ -278,11 +278,13 @@ adminRouter.post("/signin", async (req, res): Promise<any> => {
 
     const token = jwt.sign(user.id, JWT_SECRET);
 
-    // Set token in cookie
+    // Set token in cookie - configured for cross-origin requests
+    const isProduction = process.env.NODE_ENV === "production";
+    
     res.cookie("adminToken", token, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
+      secure: isProduction,
+      sameSite: isProduction ? "none" : "lax", // "none" required for cross-origin in production
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
