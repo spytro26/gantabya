@@ -2356,6 +2356,11 @@ userRouter.post(
           "../services/brevoEmailService.js"
         );
 
+        // Fetch payment details
+        const payment = await prisma.payment.findUnique({
+          where: { bookingGroupId: result.bookingGroup.id },
+        });
+
         // Prepare ticket data
         const ticketData = {
           bookingGroupId: result.bookingGroup.id,
@@ -2420,6 +2425,13 @@ userRouter.post(
             finalPrice: result.finalPrice,
             couponCode: result.couponCode || undefined,
           },
+          payment: payment
+            ? {
+                method: payment.method as string,
+                amountPaid: payment.chargedAmount,
+                currency: payment.chargedCurrency as string,
+              }
+            : undefined,
           status: "CONFIRMED" as const,
         };
 
@@ -2632,9 +2644,13 @@ userRouter.get(
   authenticateUser,
   async (req: AuthRequest, res): Promise<any> => {
     const userId = req.userId;
-    const { status, upcoming } = req.query;
+    const { status, upcoming, page = "1", limit = "5" } = req.query;
 
     try {
+      const pageNum = parseInt(page as string) || 1;
+      const limitNum = parseInt(limit as string) || 5;
+      const skip = (pageNum - 1) * limitNum;
+
       const where: any = { userId };
 
       // Filter by status if provided
@@ -2713,11 +2729,22 @@ userRouter.get(
               },
             },
           },
+          payment: {
+            select: {
+              method: true,
+              chargedAmount: true,
+              chargedCurrency: true,
+            },
+          },
         },
         orderBy: {
           createdAt: "desc",
         },
+        skip,
+        take: limitNum,
       });
+
+      const totalCount = await prisma.bookingGroup.count({ where });
 
       const formattedBookings = bookingGroups.map((group: any) => ({
         bookingGroupId: group.id,
@@ -2725,6 +2752,13 @@ userRouter.get(
         totalPrice: group.totalPrice,
         discountAmount: group.discountAmount || 0,
         finalPrice: group.finalPrice || group.totalPrice,
+        payment: group.payment
+          ? {
+              method: group.payment.method,
+              amount: group.payment.chargedAmount,
+              currency: group.payment.chargedCurrency,
+            }
+          : null,
         coupon: group.offer
           ? {
               code: group.offer.code,
@@ -2779,6 +2813,9 @@ userRouter.get(
       return res.status(200).json({
         message: "Bookings fetched successfully",
         count: formattedBookings.length,
+        total: totalCount,
+        page: pageNum,
+        totalPages: Math.ceil(totalCount / limitNum),
         bookings: formattedBookings,
       });
     } catch (e) {
@@ -2982,6 +3019,11 @@ userRouter.get(
 
       const { generateTicketPDF } = await import("../services/pdfService.js");
 
+      // Fetch payment details
+      const payment = await prisma.payment.findUnique({
+        where: { bookingGroupId: bookingGroup.id },
+      });
+
       // Prepare ticket data
       const ticketData = {
         bookingGroupId: bookingGroup.id,
@@ -3042,6 +3084,13 @@ userRouter.get(
           finalPrice: bookingGroup.finalPrice || bookingGroup.totalPrice,
           couponCode: bookingGroup.offer?.code,
         },
+        payment: payment
+          ? {
+              method: payment.method,
+              amountPaid: payment.chargedAmount,
+              currency: payment.chargedCurrency,
+            }
+          : undefined,
         status: bookingGroup.status,
       } as TicketData;
 

@@ -61,6 +61,13 @@ export interface TicketData {
     finalPrice: number;
     couponCode?: string; // Made optional
   };
+  payment?:
+    | {
+        method: string;
+        amountPaid: number;
+        currency: string;
+      }
+    | undefined;
   status: string;
 }
 
@@ -120,6 +127,12 @@ export async function generateTicketPDF(
           .fontSize(10)
           .fillColor("#0f172a")
           .text(value, x, y + 12, { width: width, ellipsis: true });
+      };
+
+      const formatDualPrice = (amountInNPR: number) => {
+        // Using 0.625 rate to match system-wide configuration
+        const amountInINR = (amountInNPR * 0.625).toFixed(2);
+        return `NPR ${amountInNPR.toFixed(2)} / INR ${amountInINR}`;
       };
 
       // ==================== HEADER ====================
@@ -252,11 +265,7 @@ export async function generateTicketPDF(
         150
       );
 
-      // Route Arrow (Simple ASCII)
-      doc
-        .fontSize(20)
-        .fillColor("#cbd5e1")
-        .text(">", midPoint - 10, currentY + 20);
+      // Route Arrow (Simple ASCII) - Removed as per request
 
       // Route Info
       drawLabelValue(
@@ -401,12 +410,12 @@ export async function generateTicketPDF(
       currentY += 20;
 
       // ==================== PAYMENT ====================
-      // Right aligned payment box
+      // Left aligned payment box as requested
       const paymentBoxWidth = 250;
-      const paymentBoxX = pageWidth - margin - paymentBoxWidth;
+      const paymentBoxX = margin; // Moved to left margin
 
       doc
-        .roundedRect(paymentBoxX, currentY, paymentBoxWidth, 90, 8)
+        .roundedRect(paymentBoxX, currentY, paymentBoxWidth, 110, 8)
         .fill("#f8fafc");
 
       let payY = currentY + 15;
@@ -432,11 +441,11 @@ export async function generateTicketPDF(
         payY += 20;
       };
 
-      drawPayRow("Total Fare", `₹${ticketData.pricing.totalPrice.toFixed(2)}`);
+      drawPayRow("Total Fare", formatDualPrice(ticketData.pricing.totalPrice));
       if (ticketData.pricing.discountAmount > 0) {
         drawPayRow(
           "Discount",
-          `-₹${ticketData.pricing.discountAmount.toFixed(2)}`,
+          `-${formatDualPrice(ticketData.pricing.discountAmount)}`,
           false,
           "#22c55e"
         );
@@ -446,17 +455,44 @@ export async function generateTicketPDF(
         .lineTo(paymentBoxX + paymentBoxWidth - 15, payY - 5)
         .strokeColor("#cbd5e1")
         .stroke();
+
+      // Final Amount (Dual Currency)
       drawPayRow(
-        "Total Amount",
-        `₹${ticketData.pricing.finalPrice.toFixed(2)}`,
+        "Total Payable",
+        formatDualPrice(ticketData.pricing.finalPrice),
         true,
-        "#4338ca" // Indigo to match header
+        "#4338ca"
       );
+
+      // Payment Method & Actual Paid Amount
+      if (ticketData.payment) {
+        payY += 5;
+        doc
+          .fontSize(9)
+          .fillColor("#64748b")
+          .text(
+            `Paid via ${ticketData.payment.method}`,
+            paymentBoxX + 15,
+            payY
+          );
+
+        const paidAmountStr = `${
+          ticketData.payment.currency
+        } ${ticketData.payment.amountPaid.toFixed(2)}`;
+        doc
+          .font("Helvetica-Bold")
+          .fontSize(9)
+          .fillColor("#0f172a")
+          .text(paidAmountStr, paymentBoxX + 15, payY, {
+            width: paymentBoxWidth - 30,
+            align: "right",
+          });
+      }
 
       // ==================== FOOTER ====================
       const footerY = pageHeight - 60;
       doc
-        .font("Helvetica-Oblique")
+        .font("Helvetica-Bold") // Made bold as requested
         .fontSize(12)
         .fillColor("#64748b")
         .text("Have a safe journey!", 0, footerY, { align: "center" });

@@ -124,9 +124,6 @@ export async function sendBookingConfirmationEmail(
       <p style="color: #555;">Your bus ticket has been successfully booked. Please find your ticket attached as a PDF.</p>
 
       <div style="background: #f0f7ff; padding: 15px; border-radius: 5px; margin: 15px 0;">
-        <p style="margin: 5px 0;"><strong>Booking ID:</strong> ${
-          bookingDetails.bookingGroupId
-        }</p>
         <p style="margin: 5px 0;"><strong>Bus:</strong> ${
           bookingDetails.busName
         } (${bookingDetails.busNumber})</p>
@@ -142,16 +139,6 @@ export async function sendBookingConfirmationEmail(
         <p style="margin: 5px 0;"><strong>Seats:</strong> ${bookingDetails.seats
           .map((s) => s.seatNumber)
           .join(", ")}</p>
-        <p style="margin: 5px 0;"><strong>Total Fare:</strong> ₹${bookingDetails.finalPrice.toFixed(
-          2
-        )}</p>
-        ${
-          bookingDetails.couponCode
-            ? `<p style="margin: 5px 0; color: green;"><strong>Discount Applied:</strong> ${
-                bookingDetails.couponCode
-              } (-₹${bookingDetails.discountAmount.toFixed(2)})</p>`
-            : ""
-        }
       </div>
 
       <p style="color: #555; font-size: 14px; margin-top: 20px;">Please arrive at the boarding point 15 minutes before departure. Show your ticket to the bus conductor.</p>
