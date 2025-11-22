@@ -87,6 +87,14 @@ export async function generateTicketPDF(
         bufferPages: true,
       });
 
+      // Register fonts
+      const fontPath = path.join(__dirname, "..", "assets", "fonts");
+      doc.registerFont(
+        "Roboto-Regular",
+        path.join(fontPath, "Roboto-Regular.ttf")
+      );
+      doc.registerFont("Roboto-Bold", path.join(fontPath, "Roboto-Bold.ttf"));
+
       const buffers: Buffer[] = [];
       doc.on("data", buffers.push.bind(buffers));
       doc.on("end", () => {
@@ -105,7 +113,7 @@ export async function generateTicketPDF(
         doc.roundedRect(margin, y, contentWidth, 25, 4).fill("#f1f5f9");
         doc
           .fillColor("#334155")
-          .font("Helvetica-Bold")
+          .font("Roboto-Bold")
           .fontSize(10)
           .text(text.toUpperCase(), margin + 10, y + 8);
       };
@@ -118,12 +126,12 @@ export async function generateTicketPDF(
         width: number
       ) => {
         doc
-          .font("Helvetica")
+          .font("Roboto-Regular")
           .fontSize(8)
           .fillColor("#64748b")
           .text(label, x, y);
         doc
-          .font("Helvetica-Bold")
+          .font("Roboto-Bold")
           .fontSize(10)
           .fillColor("#0f172a")
           .text(value, x, y + 12, { width: width, ellipsis: true });
@@ -142,7 +150,7 @@ export async function generateTicketPDF(
       // Logo & Title Centered
       const logoSize = 50;
       const title = "Go Gantabya";
-      doc.font("Helvetica-Bold").fontSize(24);
+      doc.font("Roboto-Bold").fontSize(24);
       const titleWidth = doc.widthOfString(title);
       const totalHeaderWidth = logoSize + 15 + titleWidth;
       const startX = (pageWidth - totalHeaderWidth) / 2;
@@ -226,7 +234,7 @@ export async function generateTicketPDF(
         .fill(statusColor);
       doc
         .fillColor("#ffffff")
-        .font("Helvetica-Bold")
+        .font("Roboto-Bold")
         .fontSize(10)
         .text(ticketData.status, margin + 3 * colW + 15, currentY + 22, {
           width: 80,
@@ -303,18 +311,18 @@ export async function generateTicketPDF(
 
       // Boarding (Left)
       doc
-        .font("Helvetica-Bold")
+        .font("Roboto-Bold")
         .fontSize(11)
         .fillColor("#0f172a")
         .text("Boarding Point", margin + 10, currentY + 2);
       if (ticketData.boardingPoint) {
         doc
-          .font("Helvetica-Bold")
+          .font("Roboto-Bold")
           .fontSize(12)
           .fillColor("#4338ca") // Indigo
           .text(ticketData.boardingPoint.time, margin + 10, currentY + 20);
         doc
-          .font("Helvetica")
+          .font("Roboto-Regular")
           .fontSize(10)
           .fillColor("#334155")
           .text(ticketData.boardingPoint.name, margin + 10, currentY + 38, {
@@ -335,18 +343,18 @@ export async function generateTicketPDF(
 
       // Dropping (Right)
       doc
-        .font("Helvetica-Bold")
+        .font("Roboto-Bold")
         .fontSize(11)
         .fillColor("#0f172a")
         .text("Dropping Point", midPoint + 20, currentY + 2);
       if (ticketData.droppingPoint) {
         doc
-          .font("Helvetica-Bold")
+          .font("Roboto-Bold")
           .fontSize(12)
           .fillColor("#4338ca") // Indigo
           .text(ticketData.droppingPoint.time, midPoint + 20, currentY + 20);
         doc
-          .font("Helvetica")
+          .font("Roboto-Regular")
           .fontSize(10)
           .fillColor("#334155")
           .text(ticketData.droppingPoint.name, midPoint + 20, currentY + 38, {
@@ -376,7 +384,7 @@ export async function generateTicketPDF(
       const colWidths = [50, 200, 50, 80, 100];
       let x = margin + 10;
 
-      doc.font("Helvetica-Bold").fontSize(9).fillColor("#64748b");
+      doc.font("Roboto-Bold").fontSize(9).fillColor("#64748b");
       tableHeaders.forEach((h, i) => {
         doc.text(h, x, currentY);
         x += colWidths[i] || 0;
@@ -391,12 +399,12 @@ export async function generateTicketPDF(
       currentY += 10;
 
       // Rows
-      doc.font("Helvetica").fontSize(10).fillColor("#0f172a");
+      doc.font("Roboto-Regular").fontSize(10).fillColor("#0f172a");
       ticketData.seats.forEach((seat) => {
         x = margin + 10;
-        doc.font("Helvetica-Bold").text(seat.seatNumber, x, currentY);
+        doc.font("Roboto-Bold").text(seat.seatNumber, x, currentY);
         x += colWidths[0] || 0;
-        doc.font("Helvetica").text(seat.passenger.name, x, currentY);
+        doc.font("Roboto-Regular").text(seat.passenger.name, x, currentY);
         x += colWidths[1] || 0;
         doc.text(seat.passenger.age.toString(), x, currentY);
         x += colWidths[2] || 0;
@@ -426,12 +434,12 @@ export async function generateTicketPDF(
         color: string = "#0f172a"
       ) => {
         doc
-          .font(isBold ? "Helvetica-Bold" : "Helvetica")
+          .font(isBold ? "Roboto-Bold" : "Roboto-Regular")
           .fontSize(10)
           .fillColor("#334155")
           .text(label, paymentBoxX + 15, payY);
         doc
-          .font(isBold ? "Helvetica-Bold" : "Helvetica")
+          .font(isBold ? "Roboto-Bold" : "Roboto-Regular")
           .fontSize(10)
           .fillColor(color)
           .text(amount, paymentBoxX + 15, payY, {
@@ -480,7 +488,7 @@ export async function generateTicketPDF(
           ticketData.payment.currency
         } ${ticketData.payment.amountPaid.toFixed(2)}`;
         doc
-          .font("Helvetica-Bold")
+          .font("Roboto-Bold")
           .fontSize(9)
           .fillColor("#0f172a")
           .text(paidAmountStr, paymentBoxX + 15, payY, {
@@ -492,7 +500,7 @@ export async function generateTicketPDF(
       // ==================== FOOTER ====================
       const footerY = pageHeight - 60;
       doc
-        .font("Helvetica-Bold") // Made bold as requested
+        .font("Roboto-Bold") // Made bold as requested
         .fontSize(12)
         .fillColor("#64748b")
         .text("Have a safe journey!", 0, footerY, { align: "center" });

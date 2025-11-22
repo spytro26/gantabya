@@ -13,7 +13,7 @@ import {
   busInfoQuerySchema,
 } from "../schemas/busSearchSchema.js";
 import cookieParser from "cookie-parser";
-import { sendGmail } from "./sendmail.js";
+import { sendGmail, sendPasswordResetOTP } from "./sendmail.js";
 import {
   createNotification,
   notifyBookingConfirmed,
@@ -625,7 +625,7 @@ userRouter.post("/forgot-password", async (req, res): Promise<any> => {
     }
 
     // Generate and send OTP
-    const otp = await sendGmail(email);
+    const otp = await sendPasswordResetOTP(email);
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Delete any existing password reset requests
@@ -719,127 +719,6 @@ userRouter.post("/reset-password", async (req, res): Promise<any> => {
 });
 
 // after the signin route we need the which returns the bus with the specific router
-
-// Forgot Password - Step 1: Send OTP
-userRouter.post("/forgot-password", async (req, res): Promise<any> => {
-  const { email } = req.body;
-
-  if (!email) {
-    return res.status(400).json({
-      errorMessage: "Email is required",
-    });
-  }
-
-  try {
-    // Check if user exists
-    const user = await prisma.user.findFirst({
-      where: {
-        email,
-        role: "USER",
-      },
-    });
-
-    if (!user) {
-      // Don't reveal if email exists or not for security
-      return res.status(200).json({
-        message:
-          "If an account with this email exists, a password reset OTP has been sent.",
-      });
-    }
-
-    // Generate and send OTP
-    const otp = await sendGmail(email);
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-    // Delete any existing password reset requests
-    await prisma.passwordReset.deleteMany({
-      where: { email },
-    });
-
-    // Store OTP in database
-    await prisma.passwordReset.create({
-      data: {
-        email,
-        otp: otp.toString(),
-        expiresAt,
-      },
-    });
-
-    return res.status(200).json({
-      message:
-        "If an account with this email exists, a password reset OTP has been sent.",
-    });
-  } catch (error) {
-    console.error("Error in forgot password:", error);
-    return res.status(500).json({ errorMessage: "Internal server error" });
-  }
-});
-
-// Forgot Password - Step 2: Verify OTP and Reset Password
-userRouter.post("/reset-password", async (req, res): Promise<any> => {
-  const { email, otp, newPassword } = req.body;
-
-  if (!email || !otp || !newPassword) {
-    return res.status(400).json({
-      errorMessage: "Email, OTP, and new password are required",
-    });
-  }
-
-  // Validate password strength
-  if (newPassword.length < 6) {
-    return res.status(400).json({
-      errorMessage: "Password must be at least 6 characters",
-    });
-  }
-
-  try {
-    // Find the most recent password reset record
-    const resetRequest = await prisma.passwordReset.findFirst({
-      where: {
-        email,
-        otp: otp.toString(),
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-    });
-
-    if (!resetRequest) {
-      return res.status(400).json({
-        errorMessage: "Invalid OTP",
-      });
-    }
-
-    // Check if OTP is expired
-    if (new Date() > resetRequest.expiresAt) {
-      return res.status(400).json({
-        errorMessage: "OTP has expired. Please request a new one.",
-      });
-    }
-
-    // Hash new password
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-    // Update user password
-    await prisma.user.update({
-      where: { email },
-      data: { password: hashedPassword },
-    });
-
-    // Delete used OTP
-    await prisma.passwordReset.deleteMany({
-      where: { email },
-    });
-
-    return res.status(200).json({
-      message:
-        "Password reset successfully. You can now sign in with your new password.",
-    });
-  } catch (error) {
-    console.error("Error in reset password:", error);
-    return res.status(500).json({ errorMessage: "Internal server error" });
-  }
-});
 
 // after the  signin route we need the which returns the bus with the specicxit router
 userRouter.post("/showbus", async (req, res): Promise<any> => {
