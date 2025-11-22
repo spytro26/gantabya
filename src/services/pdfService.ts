@@ -2,6 +2,7 @@ import PDFDocument from "pdfkit";
 import { PassThrough } from "stream";
 import path from "path";
 import { fileURLToPath } from "url";
+import fs from "fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -89,11 +90,11 @@ export async function generateTicketPDF(
 
       // Register fonts
       const fontPath = path.join(__dirname, "..", "assets", "fonts");
-      doc.registerFont(
-        "Roboto-Regular",
-        path.join(fontPath, "Roboto-Regular.ttf")
-      );
-      doc.registerFont("Roboto-Bold", path.join(fontPath, "Roboto-Bold.ttf"));
+      const regularFontPath = path.join(fontPath, "Roboto-Regular.ttf");
+      const boldFontPath = path.join(fontPath, "Roboto-Bold.ttf");
+
+      doc.registerFont("Roboto-Regular", regularFontPath);
+      doc.registerFont("Roboto-Bold", boldFontPath);
 
       const buffers: Buffer[] = [];
       doc.on("data", buffers.push.bind(buffers));
@@ -167,12 +168,24 @@ export async function generateTicketPDF(
           "buslogo.jpg"
         );
 
-        doc.save();
-        doc
-          .circle(startX + logoSize / 2, 30 + logoSize / 2, logoSize / 2)
-          .clip();
-        doc.image(logoPath, startX, 30, { width: logoSize, height: logoSize });
-        doc.restore();
+        // Check if file exists before trying to process it
+        if (fs.existsSync(logoPath)) {
+          doc.save();
+          try {
+            doc
+              .circle(startX + logoSize / 2, 30 + logoSize / 2, logoSize / 2)
+              .clip();
+            doc.image(logoPath, startX, 30, {
+              width: logoSize,
+              height: logoSize,
+            });
+          } finally {
+            // Always restore the graphics state to prevent clipping issues
+            doc.restore();
+          }
+        } else {
+          throw new Error("Logo file not found");
+        }
       } catch (e) {
         // Fallback if image fails - just a circle
         doc
