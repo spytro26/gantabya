@@ -27,7 +27,14 @@ interface AuthRequest extends express.Request {
 
 // Middleware to verify JWT token and extract adminId
 const authenticateAdmin = async (req: AuthRequest, res: any, next: any) => {
-  const token = req.cookies.adminToken || req.cookies.token;
+  let token = (req.cookies.adminToken || req.cookies.token) as
+    | string
+    | undefined;
+  const authHeader = (req.headers["authorization"] ||
+    req.headers["Authorization"]) as string | undefined;
+  if (!token && authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.slice(7);
+  }
 
   if (!token) {
     return res.status(401).json({ errorMessage: "Authentication required" });
@@ -280,12 +287,15 @@ adminRouter.post("/signin", async (req, res): Promise<any> => {
 
     // Set token in cookie - configured for cross-origin requests
     const isProduction = process.env.NODE_ENV === "production";
+    const cookieDomain = process.env.COOKIE_DOMAIN || undefined;
 
     res.cookie("adminToken", token, {
       httpOnly: true,
       secure: isProduction,
       sameSite: isProduction ? "none" : "lax", // "none" required for cross-origin in production
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      ...(cookieDomain ? { domain: cookieDomain } : {}),
+      path: "/",
     });
 
     return res.status(200).json({
@@ -298,6 +308,7 @@ adminRouter.post("/signin", async (req, res): Promise<any> => {
         adminVerified: user.adminVerified, // Frontend will use this to show verification status
         busServiceName: user.busServiceName,
       },
+      token,
     });
   } catch (error) {
     console.error("Error in admin signin:", error);

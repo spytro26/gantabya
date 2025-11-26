@@ -62,7 +62,13 @@ interface AuthRequest extends express.Request {
 
 // Middleware to verify JWT token and extract userId
 const authenticateUser = async (req: AuthRequest, res: any, next: any) => {
-  const token = req.cookies.token;
+  // Prefer cookie, but support Authorization: Bearer <token> for iOS/Safari where cross-site cookies may be blocked
+  let token = req.cookies?.token as string | undefined;
+  const authHeader = (req.headers["authorization"] ||
+    req.headers["Authorization"]) as string | undefined;
+  if (!token && authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.slice(7);
+  }
 
   if (!token) {
     return res.status(401).json({ errorMessage: "Authentication required" });
@@ -585,16 +591,21 @@ userRouter.post("/signin", async (req, res): Promise<any> => {
 
   // Cookie configuration for cross-origin requests
   const isProduction = process.env.NODE_ENV === "production";
+  const cookieDomain = process.env.COOKIE_DOMAIN || undefined; // e.g., .gogantabya.com if using shared domain
 
+  res.cookie("token", token, {
+    httpOnly: true,
+    secure: isProduction, // Only use secure in production (HTTPS)
+    sameSite: isProduction ? "none" : "lax", // "none" required for cross-origin in production
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    ...(cookieDomain ? { domain: cookieDomain } : {}),
+    path: "/",
+  });
+
+  // Also return token in body for iOS fallback (frontend will store and use Authorization header)
   return res
     .status(200)
-    .cookie("token", token, {
-      httpOnly: true,
-      secure: isProduction, // Only use secure in production (HTTPS)
-      sameSite: isProduction ? "none" : "lax", // "none" required for cross-origin in production
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    })
-    .json({ message: "user signed in successfully" });
+    .json({ message: "user signed in successfully", token });
 });
 
 // Forgot Password - Step 1: Send OTP
