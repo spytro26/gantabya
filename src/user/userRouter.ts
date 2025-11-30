@@ -62,12 +62,14 @@ interface AuthRequest extends express.Request {
 
 // Middleware to verify JWT token and extract userId
 const authenticateUser = async (req: AuthRequest, res: any, next: any) => {
-  // Prefer cookie, but support Authorization: Bearer <token> for iOS/Safari where cross-site cookies may be blocked
-  let token = req.cookies?.token as string | undefined;
-  const authHeader = (req.headers["authorization"] ||
-    req.headers["Authorization"]) as string | undefined;
-  if (!token && authHeader && authHeader.startsWith("Bearer ")) {
-    token = authHeader.slice(7);
+  let token = req.cookies.token;
+
+  // Fallback to Authorization header
+  if (!token && req.headers.authorization) {
+    const authHeader = req.headers.authorization;
+    if (authHeader.startsWith("Bearer ")) {
+      token = authHeader.substring(7);
+    }
   }
 
   if (!token) {
@@ -591,21 +593,26 @@ userRouter.post("/signin", async (req, res): Promise<any> => {
 
   // Cookie configuration for cross-origin requests
   const isProduction = process.env.NODE_ENV === "production";
-  const cookieDomain = process.env.COOKIE_DOMAIN || undefined; // e.g., .gogantabya.com if using shared domain
 
+  // Set cookie AND return token in response body for mobile compatibility
   res.cookie("token", token, {
     httpOnly: true,
     secure: isProduction, // Only use secure in production (HTTPS)
-    sameSite: isProduction ? "none" : "lax", // "none" required for cross-origin in production
+    sameSite: isProduction ? "lax" : "lax", // Use "lax" for better iOS compatibility (not "none")
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    ...(cookieDomain ? { domain: cookieDomain } : {}),
-    path: "/",
+    path: "/", // Important: ensure cookie is sent to all paths
   });
 
-  // Also return token in body for iOS fallback (frontend will store and use Authorization header)
-  return res
-    .status(200)
-    .json({ message: "user signed in successfully", token });
+  return res.status(200).json({
+    message: "user signed in successfully",
+    token, // Return token in body for header-based auth
+    user: {
+      id: userFound.id,
+      name: userFound.name,
+      email: userFound.email,
+      verified: userFound.verified,
+    },
+  });
 });
 
 // Forgot Password - Step 1: Send OTP

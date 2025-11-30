@@ -23,12 +23,22 @@ interface AuthRequest extends express.Request {
 }
 
 // Middleware to verify JWT token and extract superAdminId
+// Supports both cookie (preferred) and Authorization header (fallback for mobile)
 const authenticateSuperAdmin = async (
   req: AuthRequest,
   res: any,
   next: any
 ) => {
-  const token = req.cookies.superAdminToken;
+  // Try cookie first
+  let token = req.cookies.superAdminToken;
+
+  // If no cookie, try Authorization header (fallback for mobile/iOS)
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.slice(7); // Remove "Bearer " prefix
+    }
+  }
 
   if (!token) {
     return res.status(401).json({ errorMessage: "Authentication required" });
@@ -106,12 +116,14 @@ superAdminRouter.post("/signin", async (req, res): Promise<any> => {
     res.cookie("superAdminToken", token, {
       httpOnly: true,
       secure: isProduction,
-      sameSite: isProduction ? "none" : "lax", // "none" required for cross-origin in production
+      sameSite: isProduction ? "lax" : "lax", // Use "lax" for better iOS compatibility
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      path: "/", // Important: ensure cookie is sent to all paths
     });
 
     return res.status(200).json({
       message: "Super admin signin successful",
+      token, // Return token in body for header-based auth
       superAdmin: {
         id: superAdmin.id,
         username: superAdmin.username,

@@ -14,7 +14,8 @@ const ADMIN_JWT_SECRET = process.env.adminSecret || process.env.userSecret;
 
 /**
  * Middleware to authenticate user via JWT token
- * Checks cookie for token and verifies it
+ * Checks BOTH cookie (preferred) and Authorization header (fallback for mobile)
+ * This ensures iOS/mobile compatibility while maintaining security
  * Adds userId to request object
  */
 export const authenticateUser = async (
@@ -22,7 +23,16 @@ export const authenticateUser = async (
   res: Response,
   next: NextFunction
 ): Promise<any> => {
-  const token = req.cookies.token;
+  // Try to get token from cookie first (most secure - httpOnly)
+  let token = req.cookies.token;
+
+  // If no cookie, try Authorization header (fallback for mobile/iOS)
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.slice(7); // Remove "Bearer " prefix
+    }
+  }
 
   if (!token) {
     return res.status(401).json({ errorMessage: "Authentication required" });
@@ -56,7 +66,8 @@ export const authenticateUser = async (
 
 /**
  * Middleware to authenticate admin via JWT token
- * Checks cookie for token, verifies it, and confirms user has ADMIN role
+ * Checks BOTH cookie (preferred) and Authorization header (fallback for mobile)
+ * Verifies user has ADMIN role
  * Adds adminId to request object
  */
 export const authenticateAdmin = async (
@@ -64,7 +75,16 @@ export const authenticateAdmin = async (
   res: Response,
   next: NextFunction
 ): Promise<any> => {
-  const token = req.cookies.adminToken || req.cookies.token;
+  // Try cookie first
+  let token = req.cookies.adminToken || req.cookies.token;
+
+  // If no cookie, try Authorization header (fallback for mobile/iOS)
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.slice(7); // Remove "Bearer " prefix
+    }
+  }
 
   if (!token) {
     return res.status(401).json({ errorMessage: "Authentication required" });
