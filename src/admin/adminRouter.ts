@@ -27,7 +27,16 @@ interface AuthRequest extends express.Request {
 
 // Middleware to verify JWT token and extract adminId
 const authenticateAdmin = async (req: AuthRequest, res: any, next: any) => {
-  const token = req.cookies.adminToken || req.cookies.token;
+  // Try to get token from cookie first (most secure - httpOnly)
+  let token = req.cookies.adminToken || req.cookies.token;
+
+  // If no cookie, try Authorization header (fallback for mobile/iOS)
+  if (!token) {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.slice(7); // Remove "Bearer " prefix
+    }
+  }
 
   if (!token) {
     return res.status(401).json({ errorMessage: "Authentication required" });
@@ -142,17 +151,35 @@ adminRouter.post("/signup", async (req, res): Promise<any> => {
     });
 
     // Generate and send OTP
-    const otp = await sendGmail(email);
+    let otp: number;
+    try {
+      otp = await sendGmail(email);
+      console.log("✅ OTP sent successfully to admin:", email, "OTP:", otp);
+    } catch (emailError) {
+      console.error("❌ Failed to send OTP email to admin:", email, emailError);
+      throw emailError;
+    }
+
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Store OTP in database
-    await prisma.emailVerification.create({
-      data: {
+    try {
+      await prisma.emailVerification.create({
+        data: {
+          email,
+          otp: otp.toString(),
+          expiresAt,
+        },
+      });
+      console.log("✅ OTP stored in database for admin:", email);
+    } catch (dbError) {
+      console.error(
+        "❌ Failed to store OTP in database for admin:",
         email,
-        otp: otp.toString(),
-        expiresAt,
-      },
-    });
+        dbError
+      );
+      throw dbError;
+    }
 
     return res.status(201).json({
       message:
@@ -165,9 +192,14 @@ adminRouter.post("/signup", async (req, res): Promise<any> => {
         busServiceName: user.busServiceName,
       },
     });
-  } catch (error) {
-    console.error("Error in admin signup:", error);
-    return res.status(500).json({ errorMessage: "Internal server error" });
+  } catch (error: any) {
+    console.error("❌ Error in admin signup:", error);
+    console.error("Error message:", error?.message);
+    console.error("Error details:", error);
+    return res.status(500).json({
+      errorMessage: error?.message || "Internal server error",
+      details: error?.message,
+    });
   }
 });
 
