@@ -29,6 +29,20 @@ const authenticateSuperAdmin = async (
   res: any,
   next: any
 ) => {
+  // DEBUG: Log all incoming auth info
+  console.log("🔐 SuperAdmin Auth Check:", {
+    url: req.url,
+    hasCookie: !!req.cookies.superAdminToken,
+    cookiePreview: req.cookies.superAdminToken
+      ? `${req.cookies.superAdminToken.substring(0, 20)}...`
+      : "NO COOKIE",
+    hasAuthHeader: !!req.headers.authorization,
+    authHeaderPreview: req.headers.authorization
+      ? `${req.headers.authorization.substring(0, 30)}...`
+      : "NO HEADER",
+    allCookies: Object.keys(req.cookies),
+  });
+
   // Try cookie first
   let token = req.cookies.superAdminToken;
 
@@ -37,15 +51,20 @@ const authenticateSuperAdmin = async (
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith("Bearer ")) {
       token = authHeader.slice(7); // Remove "Bearer " prefix
+      console.log("✅ Using token from Authorization header");
     }
+  } else {
+    console.log("✅ Using token from cookie");
   }
 
   if (!token) {
+    console.log("❌ No token found - returning 401");
     return res.status(401).json({ errorMessage: "Authentication required" });
   }
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as { id: string };
+    console.log("✅ Token verified, superAdminId:", decoded.id);
     req.superAdminId = decoded.id;
 
     // Verify super admin exists
@@ -54,13 +73,16 @@ const authenticateSuperAdmin = async (
     });
 
     if (!superAdmin) {
+      console.log("❌ Super admin not found in database");
       return res
         .status(403)
         .json({ errorMessage: "Super admin access required" });
     }
 
+    console.log("✅ Super admin authenticated:", superAdmin.username);
     next();
-  } catch (e) {
+  } catch (e: any) {
+    console.log("❌ Token verification failed:", e.message);
     return res.status(401).json({ errorMessage: "Invalid or expired token" });
   }
 };
