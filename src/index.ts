@@ -19,7 +19,7 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",") || [
   "http://localhost:5173",
   "http://localhost:3000",
   "https://gogantabya.netlify.app",
-  "https://gantabya-front-git-main-hars-projects-5e449a73.vercel.app/",
+  "https://gantabya-front-git-main-hars-projects-5e449a73.vercel.app",
   "https://gogantabya.com",
 ];
 
