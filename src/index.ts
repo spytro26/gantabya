@@ -21,6 +21,7 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",") || [
   "https://gogantabya.netlify.app",
   "https://gantabya-front-git-main-hars-projects-5e449a73.vercel.app",
   "https://gogantabya.com",
+  "https://www.gogantabya.com/home",
 ];
 
 app.use(
