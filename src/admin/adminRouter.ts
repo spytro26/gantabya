@@ -2160,6 +2160,241 @@ adminRouter.get(
 );
 
 /**
+ * GET /admin/bookings/date-report
+ * Get date-wise booking report with detailed statistics
+ * Query params:
+ *   - date: Required. Format: YYYY-MM-DD
+ */
+adminRouter.get(
+  "/bookings/date-report",
+  authenticateAdmin,
+  async (req: AuthRequest, res): Promise<any> => {
+    const adminId = req.adminId;
+    const { date } = req.query;
+
+    if (!adminId) {
+      return res.status(401).json({ errorMessage: "Admin not authenticated" });
+    }
+
+    if (!date || typeof date !== "string") {
+      return res
+        .status(400)
+        .json({ errorMessage: "Date is required (YYYY-MM-DD format)" });
+    }
+
+    try {
+      // Parse the date
+      const reportDate = new Date(date);
+      if (isNaN(reportDate.getTime())) {
+        return res
+          .status(400)
+          .json({ errorMessage: "Invalid date format. Use YYYY-MM-DD" });
+      }
+
+      // Get all trips for this date for admin's buses
+      const trips = await prisma.trip.findMany({
+        where: {
+          tripDate: reportDate,
+          bus: {
+            adminId,
+          },
+        },
+        include: {
+          bus: {
+            include: {
+              stops: {
+                orderBy: { stopIndex: "asc" },
+              },
+            },
+          },
+          bookingGroups: {
+            where: {
+              status: "CONFIRMED",
+            },
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  phone: true,
+                },
+              },
+              fromStop: true,
+              toStop: true,
+              boardingPoint: true,
+              droppingPoint: true,
+              bookings: {
+                include: {
+                  seat: true,
+                  passenger: true,
+                },
+              },
+              payment: {
+                select: {
+                  status: true,
+                  method: true,
+                  gatewayPaymentId: true,
+                },
+              },
+            },
+          },
+        },
+      });
+
+      // Process data for each bus
+      const busWiseReport = trips.map((trip) => {
+        const bus = trip.bus;
+        const bookingGroups = trip.bookingGroups;
+
+        // Calculate seat type statistics
+        const seatStats = {
+          lowerSeater: 0,
+          lowerSleeper: 0,
+          upperSeater: 0,
+          upperSleeper: 0,
+          total: 0,
+        };
+
+        // Route-wise statistics
+        const routeStats: Record<string, { count: number; revenue: number }> =
+          {};
+
+        // Calculate totals
+        let totalRevenue = 0;
+        let totalBookings = bookingGroups.length;
+
+        bookingGroups.forEach((group) => {
+          totalRevenue += group.finalPrice || group.totalPrice;
+
+          // Route key
+          const routeKey = `${group.fromStop.name} → ${group.toStop.name}`;
+          if (!routeStats[routeKey]) {
+            routeStats[routeKey] = { count: 0, revenue: 0 };
+          }
+          routeStats[routeKey].count += 1;
+          routeStats[routeKey].revenue += group.finalPrice || group.totalPrice;
+
+          // Count seats by type
+          group.bookings.forEach((booking) => {
+            seatStats.total += 1;
+            const level = booking.seat.level; // UPPER or LOWER
+            const type = booking.seat.type; // SEATER or SLEEPER
+
+            if (level === "LOWER" && type === "SEATER") {
+              seatStats.lowerSeater += 1;
+            } else if (level === "LOWER" && type === "SLEEPER") {
+              seatStats.lowerSleeper += 1;
+            } else if (level === "UPPER" && type === "SEATER") {
+              seatStats.upperSeater += 1;
+            } else if (level === "UPPER" && type === "SLEEPER") {
+              seatStats.upperSleeper += 1;
+            }
+          });
+        });
+
+        // Get route info
+        const firstStop = bus.stops[0];
+        const lastStop = bus.stops[bus.stops.length - 1];
+        const route =
+          firstStop && lastStop
+            ? `${firstStop.name} → ${lastStop.name}`
+            : "No route defined";
+
+        return {
+          busId: bus.id,
+          busNumber: bus.busNumber,
+          busName: bus.name,
+          route,
+          tripStatus: trip.status,
+          totalSeats: bus.totalSeats,
+          seatsBooked: seatStats.total,
+          availableSeats: bus.totalSeats - seatStats.total,
+          seatBreakdown: seatStats,
+          routeWiseStats: Object.entries(routeStats).map(([route, stats]) => ({
+            route,
+            bookings: stats.count,
+            revenue: stats.revenue,
+          })),
+          totalBookings,
+          totalRevenue,
+          bookings: bookingGroups.map((group) => ({
+            bookingId: group.id,
+            passenger: {
+              name: group.user.name,
+              email: group.user.email,
+              phone: group.user.phone || "N/A",
+            },
+            route: `${group.fromStop.name} → ${group.toStop.name}`,
+            boardingPoint: group.boardingPoint?.name || group.fromStop.name,
+            droppingPoint: group.droppingPoint?.name || group.toStop.name,
+            seats: group.bookings.map((b) => ({
+              seatNumber: b.seat.seatNumber,
+              type: b.seat.type,
+              level: b.seat.level,
+              passengerName: b.passenger?.name || "N/A",
+              passengerAge: b.passenger?.age || null,
+              passengerGender: b.passenger?.gender || null,
+            })),
+            seatCount: group.bookings.length,
+            amount: group.totalPrice,
+            discount: group.discountAmount,
+            finalAmount: group.finalPrice || group.totalPrice,
+            paymentMethod: group.payment?.method || "N/A",
+            paymentStatus: group.payment?.status || "PENDING",
+            bookedAt: group.createdAt,
+          })),
+        };
+      });
+
+      // Calculate overall summary
+      const summary = {
+        date: reportDate.toISOString().split("T")[0],
+        totalBuses: trips.length,
+        totalBookings: busWiseReport.reduce(
+          (sum, b) => sum + b.totalBookings,
+          0
+        ),
+        totalSeatsBooked: busWiseReport.reduce(
+          (sum, b) => sum + b.seatsBooked,
+          0
+        ),
+        totalRevenue: busWiseReport.reduce((sum, b) => sum + b.totalRevenue, 0),
+        seatTypeBreakdown: {
+          lowerSeater: busWiseReport.reduce(
+            (sum, b) => sum + b.seatBreakdown.lowerSeater,
+            0
+          ),
+          lowerSleeper: busWiseReport.reduce(
+            (sum, b) => sum + b.seatBreakdown.lowerSleeper,
+            0
+          ),
+          upperSeater: busWiseReport.reduce(
+            (sum, b) => sum + b.seatBreakdown.upperSeater,
+            0
+          ),
+          upperSleeper: busWiseReport.reduce(
+            (sum, b) => sum + b.seatBreakdown.upperSleeper,
+            0
+          ),
+        },
+      };
+
+      return res.status(200).json({
+        message: "Date-wise booking report fetched successfully",
+        summary,
+        buses: busWiseReport,
+      });
+    } catch (e) {
+      console.error("Error fetching date-wise booking report:", e);
+      return res
+        .status(500)
+        .json({ errorMessage: "Failed to fetch booking report" });
+    }
+  }
+);
+
+/**
  * GET /admin/analytics
  * Get detailed analytics and reports
  */

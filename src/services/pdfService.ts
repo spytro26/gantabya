@@ -3,6 +3,7 @@ import { PassThrough } from "stream";
 import path from "path";
 import { fileURLToPath } from "url";
 import fs from "fs";
+import { getDualDateForPDF } from "../utils/nepaliDateConverter.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -217,6 +218,8 @@ export async function generateTicketPDF(
       // 4 Columns: Booking ID | Booked By | Booked On | Status
       const colW = contentWidth / 4;
 
+      const bookedOnDual = getDualDateForPDF(ticketData.bookedAt);
+
       drawLabelValue(
         "Booking Reference",
         ticketData.bookingGroupId.substring(0, 8).toUpperCase(),
@@ -233,7 +236,7 @@ export async function generateTicketPDF(
       );
       drawLabelValue(
         "Booked On",
-        new Date(ticketData.bookedAt).toLocaleDateString("en-IN"),
+        bookedOnDual.ad,
         margin + 2 * colW + 15,
         currentY + 15,
         colW - 20
@@ -303,20 +306,31 @@ export async function generateTicketPDF(
         currentY + 30,
         150
       );
-      drawLabelValue(
-        "Travel Date",
-        new Date(ticketData.trip.tripDate).toLocaleDateString("en-IN", {
-          weekday: "long",
-          year: "numeric",
-          month: "long",
-          day: "numeric",
-        }),
-        midPoint + 20,
-        currentY + 60,
-        200
-      );
 
-      currentY += 100;
+      // Travel Date with dual calendar
+      const travelDateDual = getDualDateForPDF(ticketData.trip.tripDate);
+      doc
+        .font("Roboto-Regular")
+        .fontSize(8)
+        .fillColor("#64748b")
+        .text("Travel Date", midPoint + 20, currentY + 60);
+      doc
+        .font("Roboto-Bold")
+        .fontSize(10)
+        .fillColor("#0f172a")
+        .text(travelDateDual.ad, midPoint + 20, currentY + 72, {
+          width: 200,
+          ellipsis: true,
+        });
+      doc
+        .font("Roboto-Regular")
+        .fontSize(8)
+        .fillColor("#4338ca")
+        .text(`(${travelDateDual.bs})`, midPoint + 20, currentY + 86, {
+          width: 200,
+        });
+
+      currentY += 110;
 
       // ==================== BOARDING & DROPPING ====================
       drawSectionHeader("Boarding & Dropping", currentY);

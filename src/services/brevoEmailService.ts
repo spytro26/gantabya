@@ -1,5 +1,6 @@
 import * as brevo from "@getbrevo/brevo";
 import "dotenv/config";
+import { getDualDateForPDF } from "../utils/nepaliDateConverter.js";
 
 const apiInstance = new brevo.TransactionalEmailsApi();
 apiInstance.setApiKey(
@@ -110,6 +111,9 @@ export async function sendBookingConfirmationEmail(
   },
   pdfBuffer: Buffer
 ): Promise<void> {
+  // Get dual date display for trip date
+  const tripDateDual = getDualDateForPDF(bookingDetails.tripDate);
+
   const htmlContent = `
   <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #f9fafc; padding: 20px; border-radius: 10px;">
     <div style="text-align: center; margin-bottom: 20px;">
@@ -127,8 +131,11 @@ export async function sendBookingConfirmationEmail(
         <p style="margin: 5px 0;"><strong>Bus:</strong> ${
           bookingDetails.busName
         } (${bookingDetails.busNumber})</p>
-        <p style="margin: 5px 0;"><strong>Date:</strong> ${
-          bookingDetails.tripDate
+        <p style="margin: 5px 0;"><strong>Date (AD):</strong> ${
+          tripDateDual.ad
+        }</p>
+        <p style="margin: 5px 0;"><strong>Date (BS):</strong> ${
+          tripDateDual.bs
         }</p>
         <p style="margin: 5px 0;"><strong>Route:</strong> ${
           bookingDetails.fromStop
