@@ -104,7 +104,7 @@ model Stop {
   busId         String
   bus           Bus     @relation(fields: [busId], references: [id], onDelete: Cascade)
   name          String
-  city          String // City name for better filtering
+  city          String // City name for better filteringF
   state         String? // Optional state
   stopIndex     Int // Order of stop (0 = origin, 1 = next, etc.)
   arrivalTime   String? // Time in format "10:30 AM" - Null for first stop (forward trip)

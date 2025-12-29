@@ -2458,120 +2458,121 @@ userRouter.post(
   }
 );
 
-userRouter.post(
-  "/cancelticket",
-  authenticateUser,
-  async (req: AuthRequest, res): Promise<any> => {
-    const { bookingGroupId } = req.body;
-    const userId = req.userId;
-
-    if (!userId) {
-      return res.status(401).json({ errorMessage: "User not authenticated" });
-    }
-
-    // Validate input
-    const validation = cancelTicketSchema.safeParse(req.body);
-    if (!validation.success) {
-      return res.status(400).json({
-        errorMessage: "Invalid booking group ID",
-        errors: validation.error.issues,
-      });
-    }
-
-    try {
-      // Start transaction
-      const result = await prisma.$transaction(async (tx) => {
-        // 1. Find booking group
-        const bookingGroup = await tx.bookingGroup.findUnique({
-          where: { id: bookingGroupId },
-          include: {
-            bookings: true,
-            trip: true,
-          },
-        });
-
-        if (!bookingGroup) {
-          throw new Error("Booking not found");
-        }
-
-        // 2. Verify ownership
-        if (bookingGroup.userId !== userId) {
-          throw new Error("Unauthorized: This booking doesn't belong to you");
-        }
-
-        // 3. Check if already cancelled
-        if (bookingGroup.status === "CANCELLED") {
-          throw new Error("Booking is already cancelled");
-        }
-
-        // 4. Check if trip has already completed
-        if (bookingGroup.trip.status === "COMPLETED") {
-          throw new Error("Cannot cancel completed trip");
-        }
-
-        // 5. Check cancellation policy (optional - you can add time-based restrictions)
-        const tripDate = bookingGroup.trip.tripDate;
-        const now = new Date();
-        const hoursUntilTrip =
-          (tripDate.getTime() - now.getTime()) / (1000 * 60 * 60);
-
-        if (hoursUntilTrip < 2) {
-          throw new Error(
-            "Cannot cancel bookings less than 2 hours before departure"
-          );
-        }
-
-        // 6. Update booking group status
-        await tx.bookingGroup.update({
-          where: { id: bookingGroupId },
-          data: { status: "CANCELLED" },
-        });
-
-        // 7. Update all bookings in the group
-        await tx.booking.updateMany({
-          where: { groupId: bookingGroupId },
-          data: {
-            status: "CANCELLED",
-            cancelledAt: new Date(),
-          },
-        });
-
-        return {
-          bookingGroup,
-          seatCount: bookingGroup.bookings.length,
-        };
-      });
-
-      // Get user details for notification
-      const user = await prisma.user.findUnique({
-        where: { id: userId },
-        select: { email: true },
-      });
-
-      // Send cancellation notification
-      if (user) {
-        await notifyBookingCancelled(
-          userId,
-          bookingGroupId,
-          result.bookingGroup.finalPrice || result.bookingGroup.totalPrice
-        );
-      }
-
-      return res.status(200).json({
-        message: "Booking cancelled successfully",
-        bookingGroupId,
-        refundAmount:
-          result.bookingGroup.finalPrice || result.bookingGroup.totalPrice,
-        seatCount: result.seatCount,
-      });
-    } catch (e: any) {
-      console.error("Error cancelling ticket:", e);
-      return res.status(500).json({
-        errorMessage: e.message || "Failed to cancel ticket",
-      });
-    }
-  }
-);
+// CANCEL TICKET FEATURE DISABLED
+// userRouter.post(
+//   "/cancelticket",
+//   authenticateUser,
+//   async (req: AuthRequest, res): Promise<any> => {
+//     const { bookingGroupId } = req.body;
+//     const userId = req.userId;
+//
+//     if (!userId) {
+//       return res.status(401).json({ errorMessage: "User not authenticated" });
+//     }
+//
+//     // Validate input
+//     const validation = cancelTicketSchema.safeParse(req.body);
+//     if (!validation.success) {
+//       return res.status(400).json({
+//         errorMessage: "Invalid booking group ID",
+//         errors: validation.error.issues,
+//       });
+//     }
+//
+//     try {
+//       // Start transaction
+//       const result = await prisma.$transaction(async (tx) => {
+//         // 1. Find booking group
+//         const bookingGroup = await tx.bookingGroup.findUnique({
+//           where: { id: bookingGroupId },
+//           include: {
+//             bookings: true,
+//             trip: true,
+//           },
+//         });
+//
+//         if (!bookingGroup) {
+//           throw new Error("Booking not found");
+//         }
+//
+//         // 2. Verify ownership
+//         if (bookingGroup.userId !== userId) {
+//           throw new Error("Unauthorized: This booking doesn't belong to you");
+//         }
+//
+//         // 3. Check if already cancelled
+//         if (bookingGroup.status === "CANCELLED") {
+//           throw new Error("Booking is already cancelled");
+//         }
+//
+//         // 4. Check if trip has already completed
+//         if (bookingGroup.trip.status === "COMPLETED") {
+//           throw new Error("Cannot cancel completed trip");
+//         }
+//
+//         // 5. Check cancellation policy (optional - you can add time-based restrictions)
+//         const tripDate = bookingGroup.trip.tripDate;
+//         const now = new Date();
+//         const hoursUntilTrip =
+//           (tripDate.getTime() - now.getTime()) / (1000 * 60 * 60);
+//
+//         if (hoursUntilTrip < 2) {
+//           throw new Error(
+//             "Cannot cancel bookings less than 2 hours before departure"
+//           );
+//         }
+//
+//         // 6. Update booking group status
+//         await tx.bookingGroup.update({
+//           where: { id: bookingGroupId },
+//           data: { status: "CANCELLED" },
+//         });
+//
+//         // 7. Update all bookings in the group
+//         await tx.booking.updateMany({
+//           where: { groupId: bookingGroupId },
+//           data: {
+//             status: "CANCELLED",
+//             cancelledAt: new Date(),
+//           },
+//         });
+//
+//         return {
+//           bookingGroup,
+//           seatCount: bookingGroup.bookings.length,
+//         };
+//       });
+//
+//       // Get user details for notification
+//       const user = await prisma.user.findUnique({
+//         where: { id: userId },
+//         select: { email: true },
+//       });
+//
+//       // Send cancellation notification
+//       if (user) {
+//         await notifyBookingCancelled(
+//           userId,
+//           bookingGroupId,
+//           result.bookingGroup.finalPrice || result.bookingGroup.totalPrice
+//         );
+//       }
+//
+//       return res.status(200).json({
+//         message: "Booking cancelled successfully",
+//         bookingGroupId,
+//         refundAmount:
+//           result.bookingGroup.finalPrice || result.bookingGroup.totalPrice,
+//         seatCount: result.seatCount,
+//       });
+//     } catch (e: any) {
+//       console.error("Error cancelling ticket:", e);
+//       return res.status(500).json({
+//         errorMessage: e.message || "Failed to cancel ticket",
+//       });
+//     }
+//   }
+// );
 
 userRouter.get(
   "/mybookings",
